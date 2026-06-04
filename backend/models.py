@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, BigInteger, Float, Boolean, String, Text, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, BigInteger, Float, Boolean, String, Text, DateTime, ForeignKey, func, LargeBinary
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import relationship
 from backend.database import Base
@@ -71,3 +71,56 @@ class TrainingMetric(Base):
     created_at = Column(DateTime, server_default=func.now())
 
     run = relationship("TrainingRun", back_populates="metrics")
+
+
+class UserBehaviorSequence(Base):
+    """Stores user temporal behavior sequences for LSTM encoding."""
+    __tablename__ = "user_behavior_sequences"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    episode_id = Column(Integer, nullable=False, index=True)
+    step = Column(Integer, nullable=False)
+    action = Column(Integer, nullable=False)
+    clicked = Column(Boolean, nullable=False)
+    dwell_time = Column(Float, nullable=False, default=0.0)
+    purchased = Column(Boolean, nullable=False, default=False)
+    state = Column(ARRAY(Float), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class ModelSnapshot(Base):
+    """Stores model parameter snapshots for auditing."""
+    __tablename__ = "model_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("training_runs.id"), nullable=False, index=True)
+    epoch = Column(Integer, nullable=False)
+    algorithm = Column(String(50), nullable=False)
+    parameters_blob = Column(LargeBinary, nullable=False)
+    hyperparameters = Column(JSONB, nullable=False)
+    state_dim = Column(Integer, nullable=False)
+    action_dim = Column(Integer, nullable=False)
+    performance_reward = Column(Float, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    run = relationship("TrainingRun")
+
+
+class ShiftDetectionRecord(Base):
+    """Records data distribution shift detection results."""
+    __tablename__ = "shift_detection_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    detection_time = Column(DateTime, server_default=func.now())
+    shift_type = Column(String(50), nullable=False)
+    metric_name = Column(String(100), nullable=False)
+    metric_value = Column(Float, nullable=False)
+    threshold = Column(Float, nullable=False)
+    is_alert = Column(Boolean, nullable=False, default=False)
+    details = Column(JSONB, nullable=True)
+    triggered_retrain = Column(Boolean, nullable=False, default=False)
+    retrain_run_id = Column(Integer, ForeignKey("training_runs.id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    retrain_run = relationship("TrainingRun")

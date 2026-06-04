@@ -24,6 +24,20 @@ DEFAULT_HYPERPARAMS = {
         "target_update_tau": 0.005,
         "chunk_refresh_interval": 20,
     },
+    "cql_rnn": {
+        "alpha": 1.0,
+        "gamma": 0.99,
+        "lr": 3e-4,
+        "batch_size": 128,
+        "epochs": 200,
+        "steps_per_epoch": 1000,
+        "hidden_dims": [256, 256],
+        "lstm_hidden_size": 128,
+        "lstm_num_layers": 2,
+        "seq_len": 10,
+        "target_update_tau": 0.005,
+        "chunk_refresh_interval": 20,
+    },
     "dqn": {
         "gamma": 0.99,
         "lr": 3e-4,
@@ -42,4 +56,12 @@ DEFAULT_HYPERPARAMS = {
         "hidden_dims": [256, 256],
         "chunk_refresh_interval": 20,
     },
+}
+
+SHIFT_DETECTION_CONFIG = {
+    "kl_threshold": 0.5,
+    "action_dist_threshold": 0.3,
+    "new_item_ratio_threshold": 0.1,
+    "check_interval_seconds": 300,
+    "auto_retrain": True,
 }

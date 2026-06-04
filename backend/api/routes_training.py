@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/training", tags=["training"])
 
 @router.post("/start", response_model=TrainingRunResponse)
 async def start_training(request: TrainingStartRequest, background_tasks: BackgroundTasks):
-    if request.algorithm not in ("cql", "dqn", "behavior_cloning"):
+    if request.algorithm not in ("cql", "cql_rnn", "dqn", "behavior_cloning"):
         raise HTTPException(status_code=400, detail=f"Unknown algorithm: {request.algorithm}")
 
     db = SessionLocal()

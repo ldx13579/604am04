@@ -5,10 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.api.routes_data import router as data_router
 from backend.api.routes_training import router as training_router
 from backend.api.routes_metrics import router as metrics_router
+from backend.api.routes_shift import router as shift_router
 from backend.algorithms.trainer import trainer
 from backend.database import engine, Base
 
-app = FastAPI(title="Offline RL Recommendation Simulator", version="1.0.0")
+app = FastAPI(title="Offline RL Recommendation Simulator", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,6 +22,7 @@ app.add_middleware(
 app.include_router(data_router)
 app.include_router(training_router)
 app.include_router(metrics_router)
+app.include_router(shift_router)
 
 
 @app.on_event("startup")

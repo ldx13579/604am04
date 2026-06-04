@@ -1,11 +1,14 @@
+import io
 import traceback
 from datetime import datetime
+import torch
 from backend.database import SessionLocal
-from backend.models import TrainingRun, TrainingMetric
-from backend.data.dataset import ReplayBuffer
+from backend.models import TrainingRun, TrainingMetric, ModelSnapshot
+from backend.data.dataset import ReplayBuffer, SequenceReplayBuffer
 from backend.environment.simulator import RecommendationEnv
 from backend.algorithms.dqn import DQN
 from backend.algorithms.cql import CQL
+from backend.algorithms.cql_rnn import CQL_RNN
 from backend.algorithms.behavior_cloning import BehaviorCloning
 from backend.config import DEFAULT_HYPERPARAMS, N_CATEGORIES, N_ITEMS
 
@@ -54,7 +57,13 @@ class Trainer:
         return run_id
 
     def _train_loop(self, run_id: int, algorithm: str, params: dict):
-        replay_buffer = ReplayBuffer(capacity=500_000, chunk_size=50_000)
+        if algorithm == "cql_rnn":
+            seq_len = params.get("seq_len", 10)
+            replay_buffer = SequenceReplayBuffer(
+                capacity=200_000, chunk_size=20_000, seq_len=seq_len
+            )
+        else:
+            replay_buffer = ReplayBuffer(capacity=500_000, chunk_size=50_000)
 
         if replay_buffer.size == 0:
             self._fail_run(run_id, "ReplayBuffer is empty - no offline data in database. Generate data first.")
@@ -67,6 +76,7 @@ class Trainer:
         batch_size = params.get("batch_size", 256)
         chunk_refresh_interval = params.get("chunk_refresh_interval", DEFAULT_CHUNK_REFRESH_INTERVAL)
         best_reward = -float("inf")
+        snapshot_interval = params.get("snapshot_interval", 50)
 
         db = SessionLocal()
         try:
@@ -88,7 +98,12 @@ class Trainer:
                 for k in epoch_metrics:
                     epoch_metrics[k] /= max(n_steps, 1)
 
-                cumulative_reward = env.evaluate_policy(agent.get_action, n_episodes=10)
+                if algorithm == "cql_rnn":
+                    cumulative_reward = env.evaluate_policy(
+                        lambda s: agent.get_action(s), n_episodes=10
+                    )
+                else:
+                    cumulative_reward = env.evaluate_policy(agent.get_action, n_episodes=10)
 
                 if cumulative_reward > best_reward:
                     best_reward = cumulative_reward
@@ -101,7 +116,7 @@ class Trainer:
                     q_value_max=epoch_metrics["q_value_max"],
                     q_value_min=epoch_metrics["q_value_min"],
                     cumulative_reward=cumulative_reward,
-                    cql_penalty=epoch_metrics["cql_penalty"] if algorithm == "cql" else None,
+                    cql_penalty=epoch_metrics["cql_penalty"] if algorithm in ("cql", "cql_rnn") else None,
                 )
                 db.add(metric)
 
@@ -118,6 +133,9 @@ class Trainer:
 
                 if chunk_refresh_interval > 0 and epoch % chunk_refresh_interval == 0:
                     replay_buffer.refresh_chunk()
+
+                if epoch % snapshot_interval == 0 or epoch == epochs:
+                    self._save_snapshot(db, run_id, epoch, algorithm, agent, params, cumulative_reward)
 
             run.status = "completed"
             run.completed_at = datetime.utcnow()
@@ -176,6 +194,16 @@ class Trainer:
                 gamma=gamma, lr=lr, hidden_dims=hidden_dims,
                 target_update_tau=tau,
             )
+        elif algorithm == "cql_rnn":
+            return CQL_RNN(
+                state_dim=N_CATEGORIES, action_dim=N_ITEMS,
+                alpha=params.get("alpha", 1.0),
+                gamma=gamma, lr=lr, hidden_dims=hidden_dims,
+                lstm_hidden_size=params.get("lstm_hidden_size", 128),
+                lstm_num_layers=params.get("lstm_num_layers", 2),
+                target_update_tau=tau,
+                seq_len=params.get("seq_len", 10),
+            )
         elif algorithm == "dqn":
             return DQN(
                 state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -189,6 +217,36 @@ class Trainer:
             )
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
+
+    def _save_snapshot(self, db, run_id: int, epoch: int, algorithm: str,
+                       agent, params: dict, reward: float):
+        """Serialize model parameters and save to database."""
+        if hasattr(agent, "get_state_dict"):
+            state_dict = agent.get_state_dict()
+        elif hasattr(agent, "q_network"):
+            state_dict = {
+                "q_network": agent.q_network.state_dict(),
+                "target_network": agent.target_network.state_dict(),
+            }
+        else:
+            state_dict = {}
+
+        buffer = io.BytesIO()
+        torch.save(state_dict, buffer)
+        blob = buffer.getvalue()
+
+        snapshot = ModelSnapshot(
+            run_id=run_id,
+            epoch=epoch,
+            algorithm=algorithm,
+            parameters_blob=blob,
+            hyperparameters=params,
+            state_dim=N_CATEGORIES,
+            action_dim=N_ITEMS,
+            performance_reward=reward,
+        )
+        db.add(snapshot)
+        db.commit()
 
 
 trainer = Trainer()

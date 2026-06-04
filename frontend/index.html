@@ -10,7 +10,7 @@
 <body>
     <header>
         <h1>Offline RL Recommendation Strategy Simulator</h1>
-        <p class="subtitle">CQL vs DQN vs Behavior Cloning</p>
+        <p class="subtitle">CQL vs DQN vs Behavior Cloning vs CQL+RNN</p>
     </header>
 
     <section class="controls">
@@ -25,6 +25,7 @@
         <div class="control-group">
             <h3>训练控制</h3>
             <button class="btn-cql" onclick="startTraining('cql')">训练 CQL</button>
+            <button class="btn-cql-rnn" onclick="startTraining('cql_rnn')">训练 CQL+RNN</button>
             <button class="btn-dqn" onclick="startTraining('dqn')">训练 DQN</button>
             <button class="btn-bc" onclick="startTraining('behavior_cloning')">训练 BC</button>
         </div>
@@ -34,6 +35,16 @@
             <label>LR: <input type="number" id="param-lr" value="0.0003" step="0.0001"></label>
             <label>Epochs: <input type="number" id="param-epochs" value="200" step="10" min="10"></label>
         </div>
+        <div class="control-group">
+            <h3>分布偏移检测</h3>
+            <button class="btn-shift" onclick="runShiftDetection()">运行偏移检测</button>
+            <button class="btn-shift-new" onclick="runShiftWithNewItems()">模拟新物品加入</button>
+        </div>
+    </section>
+
+    <section id="shift-alerts" class="alerts-panel" style="display:none;">
+        <h3>⚠ 分布偏移告警</h3>
+        <div id="alerts-container"></div>
     </section>
 
     <section class="charts-grid">
@@ -55,6 +66,16 @@
         </div>
     </section>
 
+    <section class="charts-grid">
+        <div class="chart-container chart-wide">
+            <h3>Q值分布直方图 (In-Distribution vs OOD)</h3>
+            <div class="q-dist-controls">
+                <label>选择训练Run: <select id="q-dist-run-select" onchange="loadQDistribution()"></select></label>
+            </div>
+            <canvas id="chart-q-distribution"></canvas>
+        </div>
+    </section>
+
     <section class="runs-table">
         <h3>训练记录</h3>
         <table id="runs-table">
@@ -69,6 +90,24 @@
                 </tr>
             </thead>
             <tbody id="runs-tbody"></tbody>
+        </table>
+    </section>
+
+    <section class="runs-table">
+        <h3>偏移检测记录</h3>
+        <table id="shift-table">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>指标</th>
+                    <th>值</th>
+                    <th>阈值</th>
+                    <th>告警</th>
+                    <th>触发重训</th>
+                </tr>
+            </thead>
+            <tbody id="shift-tbody"></tbody>
         </table>
     </section>
 

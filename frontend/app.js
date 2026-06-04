@@ -1,11 +1,13 @@
 const API_BASE = '/api';
 const COLORS = {
     cql: '#ff6b6b',
+    cql_rnn: '#ff9f43',
     dqn: '#ffd93d',
     behavior_cloning: '#6bcf7f',
 };
 const LABELS = {
     cql: 'CQL',
+    cql_rnn: 'CQL+RNN',
     dqn: 'DQN',
     behavior_cloning: 'Behavior Cloning',
 };
@@ -233,6 +235,11 @@ async function refreshRuns() {
                 <td><button onclick="loadFullMetrics(${r.id}, '${r.algorithm}')">加载曲线</button></td>
             </tr>
         `).join('');
+
+        const select = document.getElementById('q-dist-run-select');
+        const completedRuns = runs.filter(r => r.status === 'completed' && (r.algorithm === 'cql' || r.algorithm === 'dqn' || r.algorithm === 'cql_rnn'));
+        select.innerHTML = '<option value="">-- 选择 --</option>' +
+            completedRuns.map(r => `<option value="${r.id}">${LABELS[r.algorithm] || r.algorithm} #${r.id} (奖励: ${r.best_reward ? r.best_reward.toFixed(2) : '-'})</option>`).join('');
     } catch (e) {
         console.error(e);
     }
@@ -240,5 +247,174 @@ async function refreshRuns() {
 
 document.addEventListener('DOMContentLoaded', () => {
     initCharts();
+    initQDistChart();
     refreshRuns();
+    loadShiftRecords();
+    loadAlerts();
 });
+
+// ===== Q-Value Distribution Histogram =====
+let qDistChart = null;
+
+function initQDistChart() {
+    const ctx = document.getElementById('chart-q-distribution');
+    qDistChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: {
+                legend: { labels: { color: '#aaa' } },
+                title: { display: true, text: 'Q-values per Action (蓝=In-Distribution, 红=OOD)', color: '#aaa' },
+            },
+            scales: {
+                x: {
+                    title: { display: true, text: 'Action Index', color: '#888' },
+                    ticks: { color: '#666', maxTicksLimit: 20 },
+                    grid: { color: '#333' },
+                },
+                y: {
+                    title: { display: true, text: 'Q-value', color: '#888' },
+                    ticks: { color: '#666' },
+                    grid: { color: '#333' },
+                },
+            },
+        },
+    });
+}
+
+async function loadQDistribution() {
+    const select = document.getElementById('q-dist-run-select');
+    const runId = select.value;
+    if (!runId) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/shift/q_distribution/${runId}`);
+        if (!res.ok) {
+            console.error('Failed to load Q distribution');
+            return;
+        }
+        const data = await res.json();
+
+        const inDistColors = [];
+        const oodColors = [];
+        const bgColors = [];
+
+        for (let i = 0; i < data.action_indices.length; i++) {
+            if (data.in_distribution_mask[i]) {
+                bgColors.push('rgba(54, 162, 235, 0.7)');
+            } else {
+                bgColors.push('rgba(255, 99, 132, 0.7)');
+            }
+        }
+
+        const inDistQ = data.q_values.filter((_, i) => data.in_distribution_mask[i]);
+        const oodQ = data.q_values.filter((_, i) => !data.in_distribution_mask[i]);
+        const inDistMean = inDistQ.reduce((a, b) => a + b, 0) / (inDistQ.length || 1);
+        const oodMean = oodQ.reduce((a, b) => a + b, 0) / (oodQ.length || 1);
+
+        qDistChart.data = {
+            labels: data.action_indices,
+            datasets: [{
+                label: `Q-values (In-Dist均值=${inDistMean.toFixed(3)}, OOD均值=${oodMean.toFixed(3)})`,
+                data: data.q_values,
+                backgroundColor: bgColors,
+                borderWidth: 0,
+            }],
+        };
+        qDistChart.update();
+    } catch (e) {
+        console.error('Error loading Q distribution:', e);
+    }
+}
+
+// ===== Shift Detection =====
+async function runShiftDetection() {
+    try {
+        const res = await fetch(`${API_BASE}/shift/detect`, { method: 'POST' });
+        const results = await res.json();
+        displayShiftResults(results);
+        loadShiftRecords();
+        loadAlerts();
+    } catch (e) {
+        alert('偏移检测失败: ' + e.message);
+    }
+}
+
+async function runShiftWithNewItems() {
+    try {
+        const res = await fetch(`${API_BASE}/shift/detect_with_new_items?new_item_count=20`, { method: 'POST' });
+        const results = await res.json();
+        displayShiftResults(results);
+        loadShiftRecords();
+        loadAlerts();
+    } catch (e) {
+        alert('偏移检测失败: ' + e.message);
+    }
+}
+
+function displayShiftResults(results) {
+    const hasAlerts = results.some(r => r.is_alert);
+    const panel = document.getElementById('shift-alerts');
+    const container = document.getElementById('alerts-container');
+
+    if (hasAlerts) {
+        panel.style.display = 'block';
+        container.innerHTML = results
+            .filter(r => r.is_alert)
+            .map(r => `
+                <div class="alert-item">
+                    <span class="alert-type">${r.shift_type}</span>
+                    <span class="alert-metric">${r.metric_name}: ${r.metric_value.toFixed(4)}</span>
+                    <span class="alert-threshold">阈值: ${r.threshold.toFixed(4)}</span>
+                </div>
+            `).join('');
+    } else {
+        panel.style.display = 'none';
+    }
+}
+
+async function loadAlerts() {
+    try {
+        const res = await fetch(`${API_BASE}/shift/alerts`);
+        const alerts = await res.json();
+        const panel = document.getElementById('shift-alerts');
+        const container = document.getElementById('alerts-container');
+
+        if (alerts.length > 0) {
+            panel.style.display = 'block';
+            container.innerHTML = alerts.slice(0, 5).map(a => `
+                <div class="alert-item">
+                    <span class="alert-type">${a.shift_type}</span>
+                    <span class="alert-metric">${a.metric_name}: ${a.metric_value.toFixed(4)}</span>
+                    <span class="alert-threshold">阈值: ${a.threshold.toFixed(4)}</span>
+                    ${a.triggered_retrain ? '<span class="alert-retrain">已触发重训 #' + a.retrain_run_id + '</span>' : ''}
+                </div>
+            `).join('');
+        }
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+async function loadShiftRecords() {
+    try {
+        const res = await fetch(`${API_BASE}/shift/records?limit=20`);
+        const records = await res.json();
+        const tbody = document.getElementById('shift-tbody');
+        tbody.innerHTML = records.map(r => `
+            <tr class="${r.is_alert ? 'row-alert' : ''}">
+                <td>${r.detection_time ? new Date(r.detection_time).toLocaleString() : '-'}</td>
+                <td>${r.shift_type}</td>
+                <td>${r.metric_name}</td>
+                <td>${r.metric_value.toFixed(4)}</td>
+                <td>${r.threshold.toFixed(4)}</td>
+                <td>${r.is_alert ? '<span class="badge-alert">告警</span>' : '<span class="badge-ok">正常</span>'}</td>
+                <td>${r.triggered_retrain ? '是 (#' + r.retrain_run_id + ')' : '否'}</td>
+            </tr>
+        `).join('');
+    } catch (e) {
+        console.error(e);
+    }
+}

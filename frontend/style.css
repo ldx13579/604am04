@@ -195,3 +195,109 @@ td button {
         flex-direction: column;
     }
 }
+
+/* CQL+RNN button */
+.btn-cql-rnn {
+    background: #ff9f43;
+    color: #333;
+}
+
+/* Shift detection buttons */
+.btn-shift {
+    background: #a55eea;
+    color: white;
+}
+
+.btn-shift-new {
+    background: #e056a0;
+    color: white;
+}
+
+/* Alerts panel */
+.alerts-panel {
+    background: #3d1f1f;
+    border: 2px solid #ff6b6b;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 20px;
+}
+
+.alerts-panel h3 {
+    color: #ff6b6b;
+    margin-bottom: 10px;
+    font-size: 1rem;
+}
+
+.alert-item {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+    padding: 8px 12px;
+    background: #2d1515;
+    border-radius: 4px;
+    margin-bottom: 5px;
+    font-size: 0.85rem;
+}
+
+.alert-type {
+    background: #ff6b6b;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    font-size: 0.75rem;
+}
+
+.alert-metric {
+    color: #ffd93d;
+}
+
+.alert-threshold {
+    color: #888;
+}
+
+.alert-retrain {
+    color: #6bcf7f;
+    font-weight: 600;
+}
+
+/* Q-distribution chart */
+.chart-wide {
+    grid-column: 1 / -1;
+}
+
+.q-dist-controls {
+    margin-bottom: 10px;
+}
+
+.q-dist-controls select {
+    padding: 4px 8px;
+    background: #0f3460;
+    border: 1px solid #444;
+    color: #eee;
+    border-radius: 4px;
+    min-width: 200px;
+}
+
+/* Shift records table */
+.row-alert {
+    background: rgba(255, 107, 107, 0.1);
+}
+
+.badge-alert {
+    background: #ff6b6b;
+    color: white;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.badge-ok {
+    background: #6bcf7f;
+    color: #333;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
