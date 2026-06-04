@@ -13,12 +13,15 @@ class EnsembleCQL:
     Key improvements over naive ensemble:
     - Correlation-adjusted uncertainty: accounts for inter-model covariance to avoid
       overestimating uncertainty when models agree for correlated reasons.
+      Uses EMA-smoothed correlation for stability.
     - UCB-inspired exploration: replaces pure random with uncertainty-weighted softmax,
-      capped by an exploration budget to prevent performance degradation.
+      capped by an exploration budget with adaptive temperature to prevent performance
+      degradation from over-exploration.
     - Dynamic ensemble sizing: prunes redundant (highly correlated) models and can
-      activate dormant models when uncertainty is persistently high.
-    - On-demand loading: models are lazily initialized and can be evicted from GPU
-      when not actively needed.
+      activate dormant models when uncertainty is persistently high. Cooldown prevents
+      thrashing between expand/prune cycles.
+    - On-demand loading: models are lazily initialized with LRU-based eviction,
+      freeing GPU memory for inactive models while tracking access patterns.
     """
 
     def __init__(self, state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -53,6 +56,7 @@ class EnsembleCQL:
         self.models: List[Optional[CQL]] = []
         self._model_loaded: List[bool] = []
         self._active_mask: List[bool] = []
+        self._last_access: List[int] = []
 
         for i in range(n_models):
             self._model_configs.append({
@@ -67,6 +71,7 @@ class EnsembleCQL:
                 self.models.append(self._create_model(i))
                 self._model_loaded.append(True)
             self._active_mask.append(True)
+            self._last_access.append(0)
 
         if lazy_load:
             for i in range(min(min_active_models, n_models)):
@@ -75,12 +80,19 @@ class EnsembleCQL:
         self._exploration_count = 0
         self._total_action_count = 0
         self._correlation_matrix: Optional[np.ndarray] = None
+        self._correlation_ema: Optional[np.ndarray] = None
+        self._correlation_ema_alpha = 0.3
         self._correlation_update_interval = 50
         self._steps_since_correlation_update = 0
         self._q_history: List[List[np.ndarray]] = [[] for _ in range(n_models)]
         self._q_history_maxlen = 100
         self._exploration_decay = 1.0
         self._exploration_decay_rate = 0.995
+        self._global_step = 0
+        self._resize_cooldown = 0
+        self._resize_cooldown_period = 200
+        self._recent_exploration_rewards: List[float] = []
+        self._exploration_penalty = 0.0
 
     def _create_model(self, idx: int) -> CQL:
         cfg = self._model_configs[idx]
@@ -92,8 +104,10 @@ class EnsembleCQL:
 
     def _ensure_loaded(self, idx: int):
         if not self._model_loaded[idx]:
+            self._maybe_evict_for_memory()
             self.models[idx] = self._create_model(idx)
             self._model_loaded[idx] = True
+        self._last_access[idx] = self._global_step
 
     def _evict_model(self, idx: int):
         if self._model_loaded[idx] and not self._active_mask[idx]:
@@ -101,6 +115,22 @@ class EnsembleCQL:
             self._model_loaded[idx] = False
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+    def _maybe_evict_for_memory(self):
+        """Evict least-recently-used inactive model if too many are loaded."""
+        loaded_count = sum(self._model_loaded)
+        if loaded_count < self.max_models:
+            return
+        inactive_loaded = [
+            (self._last_access[i], i)
+            for i in range(self.n_models)
+            if self._model_loaded[i] and not self._active_mask[i]
+        ]
+        if not inactive_loaded:
+            return
+        inactive_loaded.sort()
+        _, lru_idx = inactive_loaded[0]
+        self._evict_model(lru_idx)
 
     def _get_active_indices(self) -> List[int]:
         return [i for i in range(self.n_models) if self._active_mask[i]]
@@ -114,10 +144,16 @@ class EnsembleCQL:
     # ===== Correlation-Aware Uncertainty =====
 
     def _update_correlation_matrix(self, q_values_stacked: torch.Tensor):
-        """Compute pairwise correlation between models based on Q-value predictions."""
+        """Compute pairwise correlation with EMA smoothing for stability.
+
+        Raw per-batch correlation is noisy. We use exponential moving average
+        to get a stable estimate that reflects sustained correlation patterns
+        rather than momentary fluctuations.
+        """
         n_active = q_values_stacked.shape[0]
         if n_active < 2:
             self._correlation_matrix = np.eye(n_active)
+            self._correlation_ema = np.eye(n_active)
             return
 
         q_flat = q_values_stacked.reshape(n_active, -1).cpu().numpy()
@@ -125,7 +161,15 @@ class EnsembleCQL:
         norms = np.linalg.norm(q_centered, axis=1, keepdims=True)
         norms = np.maximum(norms, 1e-8)
         q_normalized = q_centered / norms
-        self._correlation_matrix = q_normalized @ q_normalized.T
+        instant_corr = q_normalized @ q_normalized.T
+
+        if self._correlation_ema is None or self._correlation_ema.shape[0] != n_active:
+            self._correlation_ema = instant_corr
+        else:
+            alpha = self._correlation_ema_alpha
+            self._correlation_ema = alpha * instant_corr + (1 - alpha) * self._correlation_ema
+
+        self._correlation_matrix = self._correlation_ema
 
     def _compute_correlation_adjusted_uncertainty(
         self, q_values_stacked: torch.Tensor
@@ -157,11 +201,12 @@ class EnsembleCQL:
 
     def _ucb_exploration_action(self, state_t: torch.Tensor,
                                 q_values_stacked: torch.Tensor) -> int:
-        """UCB-inspired exploration: select action balancing mean Q and uncertainty.
+        """UCB-inspired exploration with adaptive temperature.
 
         Instead of pure random exploration, uses softmax over:
-            score(a) = mean_Q(a) + ucb_coefficient * std_Q(a)
-        This explores uncertain actions while still preferring high-value ones.
+            score(a) = mean_Q(a) + ucb_coefficient * std_Q(a) - penalty
+        Temperature adapts based on recent exploration outcomes to prevent
+        over-exploration from degrading overall system performance.
         """
         mean_q = q_values_stacked.mean(dim=0).squeeze(0)
         std_q = q_values_stacked.std(dim=0).squeeze(0)
@@ -173,20 +218,23 @@ class EnsembleCQL:
             correction = np.sqrt(n_models / n_eff)
             std_q = std_q * correction
 
-        scores = mean_q + self.ucb_coefficient * std_q
+        effective_ucb = self.ucb_coefficient * (1.0 - self._exploration_penalty)
+        scores = mean_q + effective_ucb * std_q
 
-        temperature = max(0.1, std_q.mean().item())
+        base_temperature = max(0.1, std_q.mean().item())
+        temperature = base_temperature * (1.0 + self._exploration_penalty)
         probs = F.softmax(scores / temperature, dim=-1)
         action = torch.multinomial(probs, 1).item()
         return action
 
     def _should_explore(self, uncertainty: float) -> bool:
-        """Determine whether to explore, respecting exploration budget."""
+        """Determine whether to explore, respecting budget and performance feedback."""
         if uncertainty <= self.uncertainty_threshold:
             return False
 
         current_ratio = self._get_exploration_ratio()
-        if current_ratio >= self.exploration_budget:
+        effective_budget = self.exploration_budget * (1.0 - self._exploration_penalty)
+        if current_ratio >= effective_budget:
             return False
 
         explore_prob = min(
@@ -198,11 +246,33 @@ class EnsembleCQL:
 
         return np.random.random() < explore_prob
 
+    def _update_exploration_penalty(self, reward: float):
+        """Track exploration impact on performance; increase penalty if harmful."""
+        self._recent_exploration_rewards.append(reward)
+        if len(self._recent_exploration_rewards) > 50:
+            self._recent_exploration_rewards.pop(0)
+
+        if len(self._recent_exploration_rewards) >= 20:
+            recent = self._recent_exploration_rewards[-10:]
+            older = self._recent_exploration_rewards[-20:-10]
+            recent_mean = np.mean(recent)
+            older_mean = np.mean(older)
+            if recent_mean < older_mean * 0.9:
+                self._exploration_penalty = min(self._exploration_penalty + 0.05, 0.8)
+            elif recent_mean > older_mean * 1.05:
+                self._exploration_penalty = max(self._exploration_penalty - 0.02, 0.0)
+
     # ===== Dynamic Ensemble Sizing =====
 
     def _evaluate_model_redundancy(self):
-        """Check if any active models are too correlated and can be deactivated."""
+        """Check if any active models are too correlated and can be deactivated.
+
+        Uses cooldown to prevent rapid expand/prune oscillation.
+        """
         if self._correlation_matrix is None:
+            return
+        if self._resize_cooldown > 0:
+            self._resize_cooldown -= 1
             return
 
         active_indices = self._get_active_indices()
@@ -225,14 +295,22 @@ class EnsembleCQL:
             if n_active - len(redundant) <= self.min_active_models:
                 break
 
+        if redundant:
+            self._resize_cooldown = self._resize_cooldown_period
+
         for idx in redundant:
             self._active_mask[idx] = False
             if self.lazy_load:
                 self._evict_model(idx)
 
     def _consider_expanding_ensemble(self, uncertainty_mean: float):
-        """If uncertainty remains high, activate dormant models or create new ones."""
+        """If uncertainty remains high, activate dormant models or create new ones.
+
+        Expansion also triggers cooldown to avoid thrashing.
+        """
         if uncertainty_mean <= self.uncertainty_threshold * 1.5:
+            return
+        if self._resize_cooldown > 0:
             return
 
         inactive_indices = [i for i in range(self.n_models) if not self._active_mask[i]]
@@ -240,6 +318,7 @@ class EnsembleCQL:
             idx = inactive_indices[0]
             self._active_mask[idx] = True
             self._ensure_loaded(idx)
+            self._resize_cooldown = self._resize_cooldown_period
             return
 
         if self.n_models < self.max_models:
@@ -253,8 +332,10 @@ class EnsembleCQL:
             self.models.append(new_model)
             self._model_loaded.append(True)
             self._active_mask.append(True)
+            self._last_access.append(self._global_step)
             self._q_history.append([])
             self.n_models += 1
+            self._resize_cooldown = self._resize_cooldown_period
 
     # ===== Core Methods =====
 
@@ -284,6 +365,7 @@ class EnsembleCQL:
         return mean_loss, avg_metrics
 
     def update(self, batch) -> dict:
+        self._global_step += 1
         active_models = self._get_active_models()
         all_metrics = []
 
@@ -304,6 +386,10 @@ class EnsembleCQL:
         avg_metrics["uncertainty_max"] = uncertainty_max
         avg_metrics["exploration_ratio"] = self._get_exploration_ratio()
         avg_metrics["active_models"] = float(len(active_models))
+
+        rewards = batch[2]
+        if rewards is not None:
+            self._update_exploration_penalty(rewards.mean().item())
 
         self._steps_since_correlation_update += 1
         if self._steps_since_correlation_update >= self._correlation_update_interval:
@@ -382,6 +468,7 @@ class EnsembleCQL:
                 self.models.append(None)
                 self._model_loaded.append(False)
                 self._active_mask.append(True)
+                self._last_access.append(0)
                 self._q_history.append([])
                 self.n_models += 1
 
@@ -424,6 +511,8 @@ class EnsembleCQL:
             "loaded_models": sum(self._model_loaded),
             "exploration_decay": self._exploration_decay,
             "exploration_ratio": self._get_exploration_ratio(),
+            "exploration_penalty": self._exploration_penalty,
+            "resize_cooldown": self._resize_cooldown,
             "mean_correlation": (
                 float(np.abs(self._correlation_matrix).mean())
                 if self._correlation_matrix is not None else 0.0

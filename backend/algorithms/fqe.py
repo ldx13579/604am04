@@ -40,6 +40,8 @@ class PolicyValidator:
     3. Action validity: all actions are within the valid range.
     4. Policy responsiveness: different states produce different actions.
     5. Reward alignment: policy actions align with positive-reward transitions in data.
+    6. Batch consistency: policy gives stable results across different data samples.
+    7. State sensitivity: policy is sensitive to meaningful state perturbations.
     """
 
     def __init__(self, state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -47,7 +49,8 @@ class PolicyValidator:
                  min_entropy_ratio=0.1,
                  max_collapse_ratio=0.95,
                  min_responsiveness=0.1,
-                 min_reward_alignment=0.0):
+                 min_reward_alignment=0.0,
+                 max_batch_variance=0.3):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.min_action_coverage = min_action_coverage
@@ -55,6 +58,7 @@ class PolicyValidator:
         self.max_collapse_ratio = max_collapse_ratio
         self.min_responsiveness = min_responsiveness
         self.min_reward_alignment = min_reward_alignment
+        self.max_batch_variance = max_batch_variance
 
     def validate(self, policy_fn: Callable, replay_buffer,
                  n_samples=1000) -> PolicyValidationResult:
@@ -71,6 +75,8 @@ class PolicyValidator:
         self._check_action_coverage(policy_actions, result)
         self._check_responsiveness(policy_actions, states, result)
         self._check_reward_alignment(policy_actions, actions_in_data, rewards, result)
+        self._check_batch_consistency(policy_fn, replay_buffer, result)
+        self._check_state_sensitivity(policy_fn, states, result)
 
         return result
 
@@ -220,6 +226,74 @@ class PolicyValidator:
             result.add_warning(
                 f"Reward alignment {alignment:.3f} below threshold "
                 f"{self.min_reward_alignment:.3f}. FQE results may be unreliable."
+            )
+
+    def _check_batch_consistency(self, policy_fn: Callable, replay_buffer,
+                                 result: PolicyValidationResult):
+        """Verify policy gives stable action distributions across different data samples.
+
+        High variance across batches suggests the policy is unstable or
+        overfitting to specific state patterns, making FQE estimates unreliable.
+        """
+        n_batches = 5
+        batch_size = min(200, replay_buffer.size)
+        action_distributions = []
+
+        for _ in range(n_batches):
+            batch = replay_buffer.sample(batch_size)
+            states = batch[0].cpu().numpy()
+            actions = self._get_policy_actions(policy_fn, states)
+            valid = actions[actions >= 0]
+            if len(valid) == 0:
+                continue
+            dist = np.bincount(valid, minlength=self.action_dim).astype(float)
+            dist /= dist.sum()
+            action_distributions.append(dist)
+
+        if len(action_distributions) < 3:
+            return
+
+        distributions = np.array(action_distributions)
+        mean_dist = distributions.mean(axis=0)
+        variance = np.mean(np.sum((distributions - mean_dist) ** 2, axis=1))
+        result.metrics["batch_action_variance"] = float(variance)
+
+        if variance > self.max_batch_variance:
+            result.add_warning(
+                f"Policy action distribution varies significantly across batches "
+                f"(variance={variance:.4f}). FQE value estimate may be unstable."
+            )
+
+    def _check_state_sensitivity(self, policy_fn: Callable, states: np.ndarray,
+                                 result: PolicyValidationResult):
+        """Check that policy responds to meaningful state changes.
+
+        A policy that ignores state input entirely (constant function) will
+        pass determinism checks but produce meaningless FQE estimates.
+        Small perturbations to states should sometimes change actions.
+        """
+        n_check = min(100, len(states))
+        perturbation_changes = 0
+
+        for i in range(n_check):
+            state = states[i]
+            try:
+                base_action = policy_fn(state)
+                perturbed = state.copy()
+                perturbed += np.random.normal(0, 0.1, size=state.shape)
+                perturbed_action = policy_fn(perturbed)
+                if base_action != perturbed_action:
+                    perturbation_changes += 1
+            except Exception:
+                continue
+
+        sensitivity = perturbation_changes / max(n_check, 1)
+        result.metrics["state_sensitivity"] = float(sensitivity)
+
+        if sensitivity < 0.02:
+            result.add_warning(
+                "Policy appears insensitive to state perturbations "
+                f"(sensitivity={sensitivity:.3f}). It may be a constant function."
             )
 
 
