@@ -124,3 +124,72 @@ class ShiftDetectionRecord(Base):
     created_at = Column(DateTime, server_default=func.now())
 
     retrain_run = relationship("TrainingRun")
+
+
+class EnsembleMetric(Base):
+    """Per-epoch uncertainty metrics for ensemble CQL training runs."""
+    __tablename__ = "ensemble_metrics"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("training_runs.id"), nullable=False, index=True)
+    epoch = Column(Integer, nullable=False)
+    uncertainty_mean = Column(Float, nullable=False)
+    uncertainty_max = Column(Float, nullable=False)
+    exploration_ratio = Column(Float, nullable=False)
+    per_model_losses = Column(JSONB, nullable=True)
+    per_model_q_means = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    run = relationship("TrainingRun")
+
+
+class FQEEvaluation(Base):
+    """Fitted Q Evaluation run metadata."""
+    __tablename__ = "fqe_evaluations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_run_id = Column(Integer, ForeignKey("training_runs.id"), nullable=False, index=True)
+    algorithm = Column(String(50), nullable=False)
+    hyperparameters = Column(JSONB, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    estimated_value = Column(Float, nullable=True)
+    total_epochs = Column(Integer, nullable=False, default=50)
+    current_epoch = Column(Integer, nullable=False, default=0)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    source_run = relationship("TrainingRun")
+    metrics = relationship("FQEMetric", back_populates="evaluation", cascade="all, delete-orphan")
+
+
+class FQEMetric(Base):
+    """Per-epoch FQE convergence metrics."""
+    __tablename__ = "fqe_metrics"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    evaluation_id = Column(Integer, ForeignKey("fqe_evaluations.id"), nullable=False, index=True)
+    epoch = Column(Integer, nullable=False)
+    estimated_value = Column(Float, nullable=False)
+    fqe_loss = Column(Float, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    evaluation = relationship("FQEEvaluation", back_populates="metrics")
+
+
+class PolicyVersion(Base):
+    """Versioned policy snapshots for comparison and lifecycle management."""
+    __tablename__ = "policy_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("training_runs.id"), nullable=False, index=True)
+    snapshot_id = Column(Integer, ForeignKey("model_snapshots.id"), nullable=False)
+    version_tag = Column(String(50), nullable=False)
+    stage = Column(String(20), nullable=False, default="candidate")
+    fqe_evaluation_id = Column(Integer, ForeignKey("fqe_evaluations.id"), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    run = relationship("TrainingRun")
+    snapshot = relationship("ModelSnapshot")
+    fqe_evaluation = relationship("FQEEvaluation")
