@@ -6,6 +6,7 @@ from backend.api.routes_data import router as data_router
 from backend.api.routes_training import router as training_router
 from backend.api.routes_metrics import router as metrics_router
 from backend.api.routes_shift import router as shift_router
+from backend.api.routes_evaluation import router as evaluation_router
 from backend.algorithms.trainer import trainer
 from backend.database import engine, Base
 
@@ -23,6 +24,7 @@ app.include_router(data_router)
 app.include_router(training_router)
 app.include_router(metrics_router)
 app.include_router(shift_router)
+app.include_router(evaluation_router)
 
 
 @app.on_event("startup")

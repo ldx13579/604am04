@@ -3,13 +3,14 @@ import traceback
 from datetime import datetime
 import torch
 from backend.database import SessionLocal
-from backend.models import TrainingRun, TrainingMetric, ModelSnapshot
+from backend.models import TrainingRun, TrainingMetric, ModelSnapshot, EnsembleMetric
 from backend.data.dataset import ReplayBuffer, SequenceReplayBuffer
 from backend.environment.simulator import RecommendationEnv
 from backend.algorithms.dqn import DQN
 from backend.algorithms.cql import CQL
 from backend.algorithms.cql_rnn import CQL_RNN
 from backend.algorithms.behavior_cloning import BehaviorCloning
+from backend.algorithms.ensemble_cql import EnsembleCQL
 from backend.config import DEFAULT_HYPERPARAMS, SHIFT_DETECTION_CONFIG, N_CATEGORIES, N_ITEMS
 
 DEFAULT_CHUNK_REFRESH_INTERVAL = 20
@@ -92,7 +93,7 @@ class Trainer:
                     metrics = agent.update(batch)
                     for k, v in metrics.items():
                         if v is not None:
-                            epoch_metrics[k] += v
+                            epoch_metrics[k] = epoch_metrics.get(k, 0) + v
                     n_steps += 1
 
                 for k in epoch_metrics:
@@ -116,9 +117,21 @@ class Trainer:
                     q_value_max=epoch_metrics["q_value_max"],
                     q_value_min=epoch_metrics["q_value_min"],
                     cumulative_reward=cumulative_reward,
-                    cql_penalty=epoch_metrics["cql_penalty"] if algorithm in ("cql", "cql_rnn") else None,
+                    cql_penalty=epoch_metrics["cql_penalty"] if algorithm in ("cql", "cql_rnn", "ensemble_cql") else None,
                 )
                 db.add(metric)
+
+                if algorithm == "ensemble_cql":
+                    ensemble_metric = EnsembleMetric(
+                        run_id=run_id,
+                        epoch=epoch,
+                        uncertainty_mean=epoch_metrics.get("uncertainty_mean", 0.0),
+                        uncertainty_max=epoch_metrics.get("uncertainty_max", 0.0),
+                        exploration_ratio=epoch_metrics.get("exploration_ratio", 0.0),
+                        per_model_losses=agent.get_per_model_losses(batch),
+                        per_model_q_means=agent.get_per_model_q_means(batch),
+                    )
+                    db.add(ensemble_metric)
 
                 run.current_epoch = epoch
                 run.best_reward = best_reward
@@ -214,6 +227,20 @@ class Trainer:
             return BehaviorCloning(
                 state_dim=N_CATEGORIES, action_dim=N_ITEMS,
                 lr=lr, hidden_dims=hidden_dims,
+            )
+        elif algorithm == "ensemble_cql":
+            return EnsembleCQL(
+                state_dim=N_CATEGORIES, action_dim=N_ITEMS,
+                alpha=params.get("alpha", 1.0),
+                gamma=gamma, lr=lr, hidden_dims=hidden_dims,
+                target_update_tau=tau,
+                n_models=params.get("n_models", 5),
+                uncertainty_threshold=params.get("uncertainty_threshold", 1.0),
+                exploration_budget=params.get("exploration_budget", 0.3),
+                correlation_threshold=params.get("correlation_threshold", 0.95),
+                min_active_models=params.get("min_active_models", 3),
+                max_models=params.get("max_models", 7),
+                ucb_coefficient=params.get("ucb_coefficient", 1.0),
             )
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
