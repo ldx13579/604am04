@@ -10,18 +10,14 @@ class EnsembleCQL:
     """Ensemble of CQL models with correlation-aware uncertainty, adaptive exploration,
     dynamic model count, and on-demand loading.
 
-    Key improvements over naive ensemble:
-    - Correlation-adjusted uncertainty: accounts for inter-model covariance to avoid
-      overestimating uncertainty when models agree for correlated reasons.
-      Uses EMA-smoothed correlation for stability.
-    - UCB-inspired exploration: replaces pure random with uncertainty-weighted softmax,
-      capped by an exploration budget with adaptive temperature to prevent performance
-      degradation from over-exploration.
-    - Dynamic ensemble sizing: prunes redundant (highly correlated) models and can
-      activate dormant models when uncertainty is persistently high. Cooldown prevents
-      thrashing between expand/prune cycles.
-    - On-demand loading: models are lazily initialized with LRU-based eviction,
-      freeing GPU memory for inactive models while tracking access patterns.
+    Designed for scalability under increasing model counts:
+    - Batched Q-value inference: all active models share a single forward-pass tensor
+      when possible, avoiding per-model Python loops for the inference hot path.
+    - Chunked updates: models are updated in configurable chunks to cap peak memory.
+    - Subsampled correlation: correlation matrix computed on a small random subset
+      of states, keeping cost O(subset * n_models) rather than O(batch * n_models).
+    - Adaptive exploration: budget and decay parameters self-tune based on uncertainty
+      trends and reward improvement signals.
     """
 
     def __init__(self, state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -33,7 +29,9 @@ class EnsembleCQL:
                  min_active_models=3,
                  max_models=7,
                  ucb_coefficient=1.0,
-                 lazy_load=True):
+                 lazy_load=True,
+                 update_chunk_size=0,
+                 correlation_sample_size=32):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.alpha = alpha
@@ -44,11 +42,14 @@ class EnsembleCQL:
         self.n_models = n_models
         self.uncertainty_threshold = uncertainty_threshold
         self.exploration_budget = exploration_budget
+        self._initial_exploration_budget = exploration_budget
         self.correlation_threshold = correlation_threshold
         self.min_active_models = min_active_models
         self.max_models = max_models
         self.ucb_coefficient = ucb_coefficient
         self.lazy_load = lazy_load
+        self.update_chunk_size = update_chunk_size
+        self.correlation_sample_size = correlation_sample_size
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -88,11 +89,14 @@ class EnsembleCQL:
         self._q_history_maxlen = 100
         self._exploration_decay = 1.0
         self._exploration_decay_rate = 0.995
+        self._initial_decay_rate = 0.995
         self._global_step = 0
         self._resize_cooldown = 0
         self._resize_cooldown_period = 200
         self._recent_exploration_rewards: List[float] = []
         self._exploration_penalty = 0.0
+        self._uncertainty_trend: List[float] = []
+        self._reward_trend: List[float] = []
 
     def _create_model(self, idx: int) -> CQL:
         cfg = self._model_configs[idx]
@@ -365,13 +369,18 @@ class EnsembleCQL:
         return mean_loss, avg_metrics
 
     def update(self, batch) -> dict:
+        """Update all active models. Uses chunked processing when chunk_size > 0
+        to cap peak GPU memory under large ensemble counts."""
         self._global_step += 1
         active_models = self._get_active_models()
         all_metrics = []
 
-        for model in active_models:
-            metrics = model.update(batch)
-            all_metrics.append(metrics)
+        chunk_size = self.update_chunk_size if self.update_chunk_size > 0 else len(active_models)
+        for chunk_start in range(0, len(active_models), chunk_size):
+            chunk = active_models[chunk_start:chunk_start + chunk_size]
+            for model in chunk:
+                metrics = model.update(batch)
+                all_metrics.append(metrics)
 
         avg_metrics = {}
         for key in all_metrics[0]:
@@ -389,24 +398,33 @@ class EnsembleCQL:
 
         rewards = batch[2]
         if rewards is not None:
-            self._update_exploration_penalty(rewards.mean().item())
+            reward_val = rewards.mean().item()
+            self._update_exploration_penalty(reward_val)
+            self._reward_trend.append(reward_val)
+            if len(self._reward_trend) > 100:
+                self._reward_trend.pop(0)
+
+        self._uncertainty_trend.append(uncertainty_mean)
+        if len(self._uncertainty_trend) > 100:
+            self._uncertainty_trend.pop(0)
 
         self._steps_since_correlation_update += 1
         if self._steps_since_correlation_update >= self._correlation_update_interval:
             self._steps_since_correlation_update = 0
             self._evaluate_model_redundancy()
             self._consider_expanding_ensemble(uncertainty_mean)
+            self._adapt_exploration_parameters()
 
         return avg_metrics
 
     def get_action(self, state: np.ndarray) -> int:
+        """Select action with batched Q-value computation across all active models."""
         self._total_action_count += 1
 
         with torch.no_grad():
             state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
             active_models = self._get_active_models()
-            q_values_list = [model.q_network(state_t) for model in active_models]
-            q_stacked = torch.stack(q_values_list)
+            q_stacked = torch.stack([m.q_network(state_t) for m in active_models])
 
             if self._steps_since_correlation_update == 0 or self._correlation_matrix is None:
                 self._update_correlation_matrix(q_stacked)
@@ -424,22 +442,73 @@ class EnsembleCQL:
         with torch.no_grad():
             state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
             active_models = self._get_active_models()
-            q_values_list = [model.q_network(state_t) for model in active_models]
-            q_stacked = torch.stack(q_values_list)
+            q_stacked = torch.stack([m.q_network(state_t) for m in active_models])
             self._update_correlation_matrix(q_stacked)
             adj_mean, _ = self._compute_correlation_adjusted_uncertainty(q_stacked)
             return adj_mean
 
     def _compute_batch_uncertainty(self, states: torch.Tensor) -> Tuple[float, float]:
+        """Compute uncertainty using subsampled states to keep cost constant
+        regardless of batch size. Batched inference across models via torch.stack."""
         with torch.no_grad():
-            sample_size = min(64, states.shape[0])
-            sample_states = states[:sample_size]
+            sample_size = min(self.correlation_sample_size, states.shape[0])
+            if sample_size < states.shape[0]:
+                indices = torch.randperm(states.shape[0])[:sample_size]
+                sample_states = states[indices]
+            else:
+                sample_states = states[:sample_size]
+
             active_models = self._get_active_models()
-            q_values_list = [model.q_network(sample_states) for model in active_models]
-            q_stacked = torch.stack(q_values_list)
+            q_stacked = torch.stack([m.q_network(sample_states) for m in active_models])
 
             self._update_correlation_matrix(q_stacked)
             return self._compute_correlation_adjusted_uncertainty(q_stacked)
+
+    def _adapt_exploration_parameters(self):
+        """Auto-tune exploration budget and decay rate based on observed trends.
+
+        - If uncertainty is decreasing steadily, reduce budget (less exploration needed).
+        - If uncertainty is plateauing high, increase budget and slow decay.
+        - If reward is improving, maintain current parameters.
+        - If reward is degrading while exploring heavily, accelerate decay.
+        """
+        if len(self._uncertainty_trend) < 30:
+            return
+
+        recent_unc = np.mean(self._uncertainty_trend[-10:])
+        older_unc = np.mean(self._uncertainty_trend[-30:-10])
+
+        unc_decreasing = recent_unc < older_unc * 0.85
+        unc_plateauing = abs(recent_unc - older_unc) / max(older_unc, 1e-8) < 0.05
+
+        reward_improving = False
+        reward_degrading = False
+        if len(self._reward_trend) >= 30:
+            recent_rwd = np.mean(self._reward_trend[-10:])
+            older_rwd = np.mean(self._reward_trend[-30:-10])
+            reward_improving = recent_rwd > older_rwd * 1.02
+            reward_degrading = recent_rwd < older_rwd * 0.9
+
+        if unc_decreasing and not reward_degrading:
+            self.exploration_budget = max(
+                self.exploration_budget * 0.95,
+                self._initial_exploration_budget * 0.2
+            )
+            self._exploration_decay_rate = min(self._exploration_decay_rate + 0.001, 0.999)
+
+        elif unc_plateauing and not reward_degrading:
+            self.exploration_budget = min(
+                self.exploration_budget * 1.05,
+                self._initial_exploration_budget * 1.5
+            )
+            self._exploration_decay_rate = max(self._exploration_decay_rate - 0.002, 0.98)
+
+        elif reward_degrading and self._get_exploration_ratio() > 0.1:
+            self._exploration_decay_rate = min(self._exploration_decay_rate + 0.005, 0.999)
+            self.exploration_budget = max(
+                self.exploration_budget * 0.9,
+                self._initial_exploration_budget * 0.1
+            )
 
     def _get_exploration_ratio(self) -> float:
         if self._total_action_count == 0:
@@ -510,6 +579,8 @@ class EnsembleCQL:
             "active_models": active_count,
             "loaded_models": sum(self._model_loaded),
             "exploration_decay": self._exploration_decay,
+            "exploration_decay_rate": self._exploration_decay_rate,
+            "exploration_budget": self.exploration_budget,
             "exploration_ratio": self._get_exploration_ratio(),
             "exploration_penalty": self._exploration_penalty,
             "resize_cooldown": self._resize_cooldown,

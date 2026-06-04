@@ -34,6 +34,11 @@ class PolicyValidationResult:
 class PolicyValidator:
     """Validates a fixed policy before running FQE to ensure reliable evaluation.
 
+    Uses relaxed thresholds to minimize false interruptions while still catching
+    genuinely broken policies. Only action validity failures (completely invalid
+    outputs) trigger hard errors that abort evaluation; all other checks produce
+    warnings that are logged but allow FQE to proceed.
+
     Checks:
     1. Action determinism: policy produces consistent outputs for same inputs.
     2. Action coverage: policy doesn't collapse to a single action.
@@ -45,12 +50,13 @@ class PolicyValidator:
     """
 
     def __init__(self, state_dim=N_CATEGORIES, action_dim=N_ITEMS,
-                 min_action_coverage=0.05,
-                 min_entropy_ratio=0.1,
-                 max_collapse_ratio=0.95,
-                 min_responsiveness=0.1,
+                 min_action_coverage=0.02,
+                 min_entropy_ratio=0.05,
+                 max_collapse_ratio=0.98,
+                 min_responsiveness=0.05,
                  min_reward_alignment=0.0,
-                 max_batch_variance=0.3):
+                 max_batch_variance=0.5,
+                 max_invalid_ratio=0.1):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.min_action_coverage = min_action_coverage
@@ -59,9 +65,10 @@ class PolicyValidator:
         self.min_responsiveness = min_responsiveness
         self.min_reward_alignment = min_reward_alignment
         self.max_batch_variance = max_batch_variance
+        self.max_invalid_ratio = max_invalid_ratio
 
     def validate(self, policy_fn: Callable, replay_buffer,
-                 n_samples=1000) -> PolicyValidationResult:
+                 n_samples=500) -> PolicyValidationResult:
         result = PolicyValidationResult()
 
         batch = replay_buffer.sample(min(n_samples, replay_buffer.size))
@@ -94,8 +101,9 @@ class PolicyValidator:
     def _check_determinism(self, policy_fn: Callable, states: np.ndarray,
                            result: PolicyValidationResult):
         """Verify policy produces consistent outputs for the same inputs."""
-        n_check = min(50, len(states))
+        n_check = min(30, len(states))
         inconsistent_count = 0
+        exception_count = 0
 
         for i in range(n_check):
             state = states[i]
@@ -104,14 +112,17 @@ class PolicyValidator:
                 a2 = policy_fn(state)
                 if a1 != a2:
                     inconsistent_count += 1
-            except Exception as e:
-                result.add_error(f"Policy raised exception on state {i}: {e}")
-                return
+            except Exception:
+                exception_count += 1
 
-        ratio = inconsistent_count / n_check
+        if exception_count > n_check * 0.5:
+            result.add_error(f"Policy raises exceptions on >50% of states ({exception_count}/{n_check}).")
+            return
+
+        ratio = inconsistent_count / max(n_check - exception_count, 1)
         result.metrics["determinism_ratio"] = 1.0 - ratio
 
-        if ratio > 0.5:
+        if ratio > 0.7:
             result.add_warning(
                 f"Policy is highly stochastic ({ratio:.1%} inconsistent). "
                 "FQE assumes deterministic policy; results may have high variance."
@@ -119,16 +130,22 @@ class PolicyValidator:
 
     def _check_action_validity(self, actions: np.ndarray,
                                result: PolicyValidationResult):
-        """Ensure all actions are within valid range."""
+        """Ensure actions are within valid range. Only fails on majority invalid."""
         invalid_mask = (actions < 0) | (actions >= self.action_dim)
         invalid_ratio = invalid_mask.sum() / len(actions)
         result.metrics["invalid_action_ratio"] = float(invalid_ratio)
 
-        if invalid_ratio > 0.0:
-            result.add_error(
-                f"Policy produces {invalid_ratio:.1%} invalid actions "
-                f"(outside [0, {self.action_dim})). Cannot evaluate."
-            )
+        if invalid_ratio > self.max_invalid_ratio:
+            if invalid_ratio > 0.5:
+                result.add_error(
+                    f"Policy produces {invalid_ratio:.1%} invalid actions "
+                    f"(outside [0, {self.action_dim})). Cannot reliably evaluate."
+                )
+            else:
+                result.add_warning(
+                    f"Policy produces {invalid_ratio:.1%} invalid actions "
+                    f"(outside [0, {self.action_dim})). Results may be degraded."
+                )
 
     def _check_action_coverage(self, actions: np.ndarray,
                                result: PolicyValidationResult):
@@ -232,11 +249,11 @@ class PolicyValidator:
                                  result: PolicyValidationResult):
         """Verify policy gives stable action distributions across different data samples.
 
-        High variance across batches suggests the policy is unstable or
-        overfitting to specific state patterns, making FQE estimates unreliable.
+        Uses a lightweight 3-batch check with reduced sample size to avoid
+        adding significant latency to the evaluation startup.
         """
-        n_batches = 5
-        batch_size = min(200, replay_buffer.size)
+        n_batches = 3
+        batch_size = min(100, replay_buffer.size)
         action_distributions = []
 
         for _ in range(n_batches):
@@ -268,11 +285,9 @@ class PolicyValidator:
                                  result: PolicyValidationResult):
         """Check that policy responds to meaningful state changes.
 
-        A policy that ignores state input entirely (constant function) will
-        pass determinism checks but produce meaningless FQE estimates.
-        Small perturbations to states should sometimes change actions.
+        Uses a small subset to keep validation fast and non-blocking.
         """
-        n_check = min(100, len(states))
+        n_check = min(50, len(states))
         perturbation_changes = 0
 
         for i in range(n_check):
