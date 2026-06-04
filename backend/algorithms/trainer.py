@@ -9,7 +9,9 @@ from backend.algorithms.cql import CQL
 from backend.algorithms.behavior_cloning import BehaviorCloning
 from backend.config import DEFAULT_HYPERPARAMS, N_CATEGORIES, N_ITEMS
 
-CHUNK_REFRESH_INTERVAL = 20
+DEFAULT_CHUNK_REFRESH_INTERVAL = 20
+ERROR_DETAIL_MAX_LENGTH = 5000
+ERROR_DETAIL_TAIL_RESERVED = 2000
 
 
 class Trainer:
@@ -63,10 +65,13 @@ class Trainer:
         epochs = params.get("epochs", 200)
         steps_per_epoch = params.get("steps_per_epoch", 1000)
         batch_size = params.get("batch_size", 256)
+        chunk_refresh_interval = params.get("chunk_refresh_interval", DEFAULT_CHUNK_REFRESH_INTERVAL)
         best_reward = -float("inf")
 
         db = SessionLocal()
         try:
+            run = db.query(TrainingRun).get(run_id)
+
             for epoch in range(1, epochs + 1):
                 epoch_metrics = {"loss": 0, "q_value_mean": 0, "q_value_max": 0,
                                  "q_value_min": 0, "cql_penalty": 0}
@@ -100,7 +105,6 @@ class Trainer:
                 )
                 db.add(metric)
 
-                run = db.query(TrainingRun).get(run_id)
                 run.current_epoch = epoch
                 run.best_reward = best_reward
                 db.commit()
@@ -112,21 +116,36 @@ class Trainer:
                     "cumulative_reward": cumulative_reward,
                 }
 
-                if epoch % CHUNK_REFRESH_INTERVAL == 0:
+                if chunk_refresh_interval > 0 and epoch % chunk_refresh_interval == 0:
                     replay_buffer.refresh_chunk()
 
-            run = db.query(TrainingRun).get(run_id)
             run.status = "completed"
             run.completed_at = datetime.utcnow()
             run.current_epoch = epochs
             db.commit()
         except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            error_msg = self._format_error(e)
             self._fail_run(run_id, error_msg, db=db)
         finally:
             if run_id in self.active_runs:
                 del self.active_runs[run_id]
             db.close()
+
+    def _format_error(self, exc: Exception) -> str:
+        """Format exception preserving short messages fully, truncating long ones smartly."""
+        summary = f"{type(exc).__name__}: {str(exc)}"
+        tb = traceback.format_exc()
+        full_msg = f"{summary}\n{tb}"
+
+        if len(full_msg) <= ERROR_DETAIL_MAX_LENGTH:
+            return full_msg
+
+        # For long errors: keep the summary + beginning of traceback, and the tail
+        # (tail often has the most relevant frames closest to the raise site)
+        head_budget = ERROR_DETAIL_MAX_LENGTH - ERROR_DETAIL_TAIL_RESERVED - len("\n...[truncated]...\n")
+        head_part = full_msg[:head_budget]
+        tail_part = full_msg[-ERROR_DETAIL_TAIL_RESERVED:]
+        return f"{head_part}\n...[truncated]...\n{tail_part}"
 
     def _fail_run(self, run_id: int, error_detail: str, db=None):
         close_db = False
@@ -137,7 +156,7 @@ class Trainer:
             run = db.query(TrainingRun).get(run_id)
             if run:
                 run.status = "failed"
-                run.error_detail = error_detail[:5000]
+                run.error_detail = error_detail
                 run.completed_at = datetime.utcnow()
                 db.commit()
         finally:

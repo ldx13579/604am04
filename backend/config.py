@@ -22,6 +22,7 @@ DEFAULT_HYPERPARAMS = {
         "steps_per_epoch": 1000,
         "hidden_dims": [256, 256],
         "target_update_tau": 0.005,
+        "chunk_refresh_interval": 20,
     },
     "dqn": {
         "gamma": 0.99,
@@ -31,6 +32,7 @@ DEFAULT_HYPERPARAMS = {
         "steps_per_epoch": 1000,
         "hidden_dims": [256, 256],
         "target_update_tau": 0.005,
+        "chunk_refresh_interval": 20,
     },
     "behavior_cloning": {
         "lr": 3e-4,
@@ -38,5 +40,6 @@ DEFAULT_HYPERPARAMS = {
         "epochs": 200,
         "steps_per_epoch": 1000,
         "hidden_dims": [256, 256],
+        "chunk_refresh_interval": 20,
     },
 }
