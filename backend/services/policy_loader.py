@@ -1,4 +1,5 @@
 import io
+import time
 import hashlib
 import threading
 import numpy as np
@@ -11,15 +12,75 @@ from backend.algorithms.cql_rnn import CQL_RNN
 from backend.algorithms.ensemble_cql import EnsembleCQL
 from backend.config import N_CATEGORIES, N_ITEMS
 
+CACHE_TTL_SECONDS = 30
 
-class PolicyLoader:
-    """Singleton that caches the current production policy in memory."""
+
+class TrafficAllocator:
+    """Consistent traffic allocation with balance correction.
+
+    Uses deterministic hashing for session stickiness while tracking
+    cumulative allocation to correct drift from the target split.
+    """
 
     def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = {}
+
+    def assign_group(self, session_id: str, experiment_id: int, traffic_split: float) -> str:
+        h = int(hashlib.sha256(
+            f"{experiment_id}:{session_id}".encode()
+        ).hexdigest(), 16)
+        bucket = (h % 10000) / 10000.0
+
+        with self._lock:
+            key = experiment_id
+            if key not in self._counts:
+                self._counts[key] = {"A": 0, "B": 0}
+
+            counts = self._counts[key]
+            total = counts["A"] + counts["B"]
+
+            if total > 0 and total >= 20:
+                actual_ratio_a = counts["A"] / total
+                drift = actual_ratio_a - traffic_split
+                correction = drift * 0.3
+                effective_split = traffic_split - correction
+                effective_split = max(0.05, min(0.95, effective_split))
+            else:
+                effective_split = traffic_split
+
+            group = "A" if bucket < effective_split else "B"
+            counts[group] += 1
+
+        return group
+
+    def get_balance(self, experiment_id: int) -> dict:
+        with self._lock:
+            counts = self._counts.get(experiment_id, {"A": 0, "B": 0})
+            total = counts["A"] + counts["B"]
+            return {
+                "group_a_count": counts["A"],
+                "group_b_count": counts["B"],
+                "actual_split_a": counts["A"] / total if total > 0 else 0.0,
+                "total_allocations": total,
+            }
+
+    def reset(self, experiment_id: int):
+        with self._lock:
+            self._counts.pop(experiment_id, None)
+
+
+class PolicyLoader:
+    """Singleton that caches the current production policy with TTL-based refresh."""
+
+    def __init__(self, cache_ttl: float = CACHE_TTL_SECONDS):
         self._lock = threading.Lock()
         self._agent = None
         self._policy_version_id = None
         self._algorithm = None
+        self._hyperparams = None
+        self._cache_ttl = cache_ttl
+        self._last_check_time = 0.0
 
     def _load_agent_from_snapshot(self, snapshot, algorithm, hyperparams):
         buffer = io.BytesIO(snapshot.parameters_blob)
@@ -40,6 +101,19 @@ class PolicyLoader:
                 uncertainty_threshold=hyperparams.get("uncertainty_threshold", 1.0),
             )
             agent.load_state_dict(state_dict)
+        elif algorithm == "cql_rnn":
+            agent = CQL_RNN(
+                state_dim=N_CATEGORIES, action_dim=N_ITEMS,
+                alpha=hyperparams.get("alpha", 1.0),
+                gamma=gamma, lr=lr, hidden_dims=hidden_dims,
+                target_update_tau=tau,
+                lstm_hidden_size=hyperparams.get("lstm_hidden_size", 128),
+                lstm_num_layers=hyperparams.get("lstm_num_layers", 2),
+            )
+            agent.q_network.load_state_dict(state_dict["q_network"])
+            agent.target_network.load_state_dict(state_dict["target_network"])
+            if "user_encoder" in state_dict:
+                agent.user_encoder.load_state_dict(state_dict["user_encoder"])
         elif algorithm in ("cql", "dqn"):
             AgentClass = CQL if algorithm == "cql" else DQN
             kwargs = dict(state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -62,7 +136,12 @@ class PolicyLoader:
         return agent
 
     def _ensure_loaded(self):
-        """Load or reload the production policy if changed."""
+        """Load or reload production policy, respecting cache TTL."""
+        now = time.time()
+        if now - self._last_check_time < self._cache_ttl:
+            return
+        self._last_check_time = now
+
         db = SessionLocal()
         try:
             pv = db.query(PolicyVersion).filter(
@@ -70,9 +149,11 @@ class PolicyLoader:
             ).order_by(PolicyVersion.created_at.desc()).first()
 
             if pv is None:
+                if self._agent is not None:
+                    return
                 run = db.query(TrainingRun).filter(
                     TrainingRun.status == "completed",
-                    TrainingRun.algorithm == "cql"
+                    TrainingRun.algorithm.in_(["cql", "ensemble_cql", "cql_rnn", "dqn"])
                 ).order_by(TrainingRun.best_reward.desc().nullslast()).first()
                 if run is None:
                     return
@@ -86,6 +167,7 @@ class PolicyLoader:
                         snapshot, run.algorithm, run.hyperparameters)
                     self._policy_version_id = None
                     self._algorithm = run.algorithm
+                    self._hyperparams = run.hyperparameters
                 return
 
             if pv.id == self._policy_version_id:
@@ -100,8 +182,13 @@ class PolicyLoader:
                     snapshot, run.algorithm, run.hyperparameters)
                 self._policy_version_id = pv.id
                 self._algorithm = run.algorithm
+                self._hyperparams = run.hyperparameters
         finally:
             db.close()
+
+    def invalidate_cache(self):
+        """Force next call to re-check DB."""
+        self._last_check_time = 0.0
 
     def get_action(self, state: np.ndarray) -> int:
         self._ensure_loaded()
@@ -140,10 +227,10 @@ class PolicyLoader:
     def current_algorithm(self):
         return self._algorithm
 
-    @staticmethod
-    def assign_group(session_id: str, traffic_split: float) -> str:
-        h = int(hashlib.md5(session_id.encode()).hexdigest(), 16)
-        return "A" if (h % 10000) / 10000 < traffic_split else "B"
+    @property
+    def current_hyperparams(self):
+        return self._hyperparams
 
 
+traffic_allocator = TrafficAllocator()
 policy_loader = PolicyLoader()

@@ -676,3 +676,34 @@ label input[type="text"] {
     background: #2980b9;
     color: white;
 }
+
+.perf-comparison {
+    margin: 10px 0;
+}
+
+.perf-winner {
+    padding: 8px 15px;
+    background: rgba(39, 174, 96, 0.15);
+    border: 1px solid rgba(39, 174, 96, 0.4);
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 0.9rem;
+}
+
+.perf-comparison table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.perf-comparison th,
+.perf-comparison td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #333;
+}
+
+.perf-comparison th {
+    color: #888;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+}

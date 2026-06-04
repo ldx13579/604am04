@@ -4,7 +4,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from backend.database import SessionLocal
 from backend.models import ABExperiment, ABImpression, ABClick, OnlineInteraction
-from backend.services.policy_loader import policy_loader
+from backend.services.policy_loader import policy_loader, traffic_allocator
 from backend.schemas import (
     RecommendRequest, RecommendResponse, FeedbackRequest, PolicyInfoResponse
 )
@@ -29,7 +29,9 @@ async def predict(request: RecommendRequest):
         ).first()
 
         if experiment:
-            group = policy_loader.assign_group(session_id, experiment.traffic_split)
+            group = traffic_allocator.assign_group(
+                session_id, experiment.id, experiment.traffic_split
+            )
             experiment_id = experiment.id
 
             if group == "A":
@@ -114,3 +116,20 @@ async def policy_info():
         policy_version_id=policy_loader.current_version_id,
         algorithm=policy_loader.current_algorithm,
     )
+
+
+@router.get("/traffic_balance")
+async def traffic_balance():
+    db = SessionLocal()
+    try:
+        experiment = db.query(ABExperiment).filter(
+            ABExperiment.status == "running"
+        ).first()
+        if not experiment:
+            return {"active": False}
+        balance = traffic_allocator.get_balance(experiment.id)
+        balance["active"] = True
+        balance["target_split_a"] = experiment.traffic_split
+        return balance
+    finally:
+        db.close()

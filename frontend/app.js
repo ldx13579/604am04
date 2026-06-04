@@ -1420,7 +1420,10 @@ async function pollFinetuneStatus() {
         const status = document.getElementById('finetune-buffer-status');
         const pct = Math.min(100, (data.buffer_size / 500) * 100);
         bar.style.width = pct + '%';
-        status.textContent = `Buffer: ${data.buffer_size} / 500${data.is_running ? ' | 微调中...' : ''}`;
+        let text = `Buffer: ${data.buffer_size} / 500`;
+        if (data.is_running) text += ' | 微调中...';
+        if (data.last_algorithm_used) text += ` | 算法: ${data.last_algorithm_used}`;
+        status.textContent = text;
     } catch (e) {}
 }
 
@@ -1487,13 +1490,18 @@ function initPerfCharts() {
 async function startBenchmark() {
     const sizes = document.getElementById('bench-sizes').value.split(',').map(s => parseInt(s.trim()));
     const epochs = parseInt(document.getElementById('bench-epochs').value);
+    const algInput = document.getElementById('bench-algorithms');
+    const algorithms = algInput && algInput.value
+        ? algInput.value.split(',').map(s => s.trim())
+        : null;
+
     document.getElementById('bench-status').textContent = '运行中...';
 
     try {
         await fetch(`${API_BASE}/performance/benchmark/start`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ dataset_sizes: sizes, epochs })
+            body: JSON.stringify({ dataset_sizes: sizes, epochs, algorithms })
         });
         const pollId = setInterval(async () => {
             const sRes = await fetch(`${API_BASE}/performance/benchmark/status`);
@@ -1502,8 +1510,10 @@ async function startBenchmark() {
                 clearInterval(pollId);
                 document.getElementById('bench-status').textContent = '完成';
                 loadPerfResults();
+                loadPerfComparison();
             } else {
-                document.getElementById('bench-status').textContent = `运行中: ${status.current_size} ...`;
+                const detail = status.current_algorithm ? `${status.current_algorithm}@${status.current_size}` : status.current_size;
+                document.getElementById('bench-status').textContent = `运行中: ${detail} ...`;
             }
         }, 5000);
     } catch (e) {
@@ -1519,16 +1529,29 @@ async function loadPerfResults() {
 
         if (!entries.length) return;
 
-        const labels = entries.map(e => e.dataset_size.toLocaleString());
-        const times = entries.map(e => e.training_time_seconds);
-        const rewards = entries.map(e => e.final_reward);
+        const algorithms = [...new Set(entries.map(e => e.algorithm))];
+        const algColors = { cql: '#ff6b6b', dqn: '#ffd93d', behavior_cloning: '#6bcf7f', ensemble_cql: '#a55eea', cql_rnn: '#ff9f43' };
 
-        perfTimeChart.data.labels = labels;
-        perfTimeChart.data.datasets[0].data = times;
+        // Multi-algorithm time chart
+        perfTimeChart.data.labels = [...new Set(entries.map(e => e.dataset_size.toLocaleString()))];
+        perfTimeChart.data.datasets = algorithms.map(alg => ({
+            label: alg.toUpperCase(),
+            data: entries.filter(e => e.algorithm === alg).map(e => e.training_time_seconds),
+            backgroundColor: (algColors[alg] || '#888') + '88',
+            borderColor: algColors[alg] || '#888',
+            borderWidth: 1,
+        }));
         perfTimeChart.update('none');
 
-        perfRewardChart.data.labels = labels;
-        perfRewardChart.data.datasets[0].data = rewards;
+        // Multi-algorithm reward chart
+        perfRewardChart.data.labels = [...new Set(entries.map(e => e.dataset_size.toLocaleString()))];
+        perfRewardChart.data.datasets = algorithms.map(alg => ({
+            label: alg.toUpperCase(),
+            data: entries.filter(e => e.algorithm === alg).map(e => e.final_reward),
+            borderColor: algColors[alg] || '#888',
+            fill: false,
+            tension: 0.3,
+        }));
         perfRewardChart.update('none');
 
         let html = '';
@@ -1547,6 +1570,33 @@ async function loadPerfResults() {
     } catch (e) {}
 }
 
+async function loadPerfComparison() {
+    try {
+        const res = await fetch(`${API_BASE}/performance/benchmark/comparison`);
+        const data = await res.json();
+        if (!data.comparison || !data.comparison.length) return;
+
+        let html = '<div class="perf-comparison">';
+        if (data.winner) {
+            html += `<div class="perf-winner">最佳算法: <strong>${data.winner.toUpperCase()}</strong></div>`;
+        }
+        html += '<table><thead><tr><th>算法</th><th>平均奖励</th><th>平均时间</th><th>样本效率</th><th>计算效率</th></tr></thead><tbody>';
+        data.comparison.forEach(c => {
+            html += `<tr>
+                <td><strong>${c.algorithm.toUpperCase()}</strong></td>
+                <td>${c.avg_reward.toFixed(3)}</td>
+                <td>${c.avg_time.toFixed(1)}s</td>
+                <td>${c.avg_sample_efficiency.toFixed(4)}</td>
+                <td>${c.avg_compute_efficiency.toFixed(4)}</td>
+            </tr>`;
+        });
+        html += '</tbody></table></div>';
+
+        const container = document.getElementById('perf-comparison-container');
+        if (container) container.innerHTML = html;
+    } catch (e) {}
+}
+
 
 // =============================================
 // Initialization
@@ -1560,6 +1610,7 @@ document.addEventListener('DOMContentLoaded', () => {
     pollFinetuneStatus();
     loadFinetuneRuns();
     loadPerfResults();
+    loadPerfComparison();
 
     setInterval(pollFinetuneStatus, 10000);
     setInterval(loadFinetuneRuns, 30000);

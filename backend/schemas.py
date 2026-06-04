@@ -221,6 +221,7 @@ class FinetuneStatusResponse(BaseModel):
     buffer_size: int
     last_run_at: Optional[datetime] = None
     last_reward_improvement: Optional[float] = None
+    last_algorithm_used: Optional[str] = None
 
 
 class FinetuneRunResponse(BaseModel):
@@ -248,6 +249,7 @@ class FinetuneConfigUpdateRequest(BaseModel):
 class BenchmarkStartRequest(BaseModel):
     dataset_sizes: List[int] = [10000, 50000, 100000, 500000, 1000000]
     algorithm: str = "cql"
+    algorithms: Optional[List[str]] = None
     epochs: int = 50
 
 

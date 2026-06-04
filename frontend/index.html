@@ -314,6 +314,7 @@
         <div class="control-group">
             <h3>性能基准测试</h3>
             <label>数据集大小: <input type="text" id="bench-sizes" value="10000,50000,100000,500000"></label>
+            <label>算法 (多个逗号分隔): <input type="text" id="bench-algorithms" value="cql,dqn" placeholder="cql,dqn,ensemble_cql"></label>
             <label>Epochs: <input type="number" id="bench-epochs" value="50" step="10"></label>
             <button class="btn-benchmark" onclick="startBenchmark()">运行基准测试</button>
             <span id="bench-status">就绪</span>
@@ -332,7 +333,12 @@
     </section>
 
     <section class="runs-table">
-        <h3>性能报告</h3>
+        <h3>算法对比分析</h3>
+        <div id="perf-comparison-container"></div>
+    </section>
+
+    <section class="runs-table">
+        <h3>性能报告明细</h3>
         <table id="perf-table">
             <thead>
                 <tr>
