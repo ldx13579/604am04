@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   db:
-    image: postgres:15
+    image: timescale/timescaledb:latest-pg15
     environment:
       POSTGRES_DB: offline_rl
       POSTGRES_USER: rl_user
@@ -11,6 +11,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./scripts/init_timescaledb.sql:/docker-entrypoint-initdb.d/01_timescaledb.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rl_user -d offline_rl"]
       interval: 5s
@@ -29,6 +30,7 @@ services:
       DATABASE_URL: postgresql://rl_user:rl_password@db:5432/offline_rl
     volumes:
       - .:/app
+      - model_cache:/app/model_cache
 
   frontend:
     image: nginx:alpine
@@ -42,3 +44,4 @@ services:
 
 volumes:
   pgdata:
+  model_cache:

@@ -193,3 +193,92 @@ class PolicyVersion(Base):
     run = relationship("TrainingRun")
     snapshot = relationship("ModelSnapshot")
     fqe_evaluation = relationship("FQEEvaluation")
+
+
+class ABExperiment(Base):
+    __tablename__ = "ab_experiments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True)
+    strategy_a = Column(String(50), nullable=False, default="cql")
+    strategy_b = Column(String(50), nullable=False, default="random")
+    traffic_split = Column(Float, nullable=False, default=0.5)
+    status = Column(String(20), nullable=False, default="running")
+    created_at = Column(DateTime, server_default=func.now())
+    ended_at = Column(DateTime, nullable=True)
+
+
+class ABImpression(Base):
+    __tablename__ = "ab_impressions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    experiment_id = Column(Integer, ForeignKey("ab_experiments.id"), nullable=False, index=True)
+    group_name = Column(String(10), nullable=False)
+    user_state = Column(ARRAY(Float), nullable=False)
+    recommended_items = Column(ARRAY(Integer), nullable=False)
+    session_id = Column(String(64), nullable=True)
+    timestamp = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+
+class ABClick(Base):
+    __tablename__ = "ab_clicks"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    impression_id = Column(BigInteger, ForeignKey("ab_impressions.id"), nullable=False, index=True)
+    item_id = Column(Integer, nullable=False)
+    clicked = Column(Boolean, nullable=False)
+    timestamp = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+
+class ABCTRSnapshot(Base):
+    __tablename__ = "ab_ctr_snapshots"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    experiment_id = Column(Integer, ForeignKey("ab_experiments.id"), nullable=False, index=True)
+    group_name = Column(String(10), nullable=False)
+    window_start = Column(DateTime, nullable=False, index=True)
+    window_end = Column(DateTime, nullable=False)
+    impressions_count = Column(Integer, nullable=False, default=0)
+    clicks_count = Column(Integer, nullable=False, default=0)
+    ctr = Column(Float, nullable=False, default=0.0)
+
+
+class OnlineInteraction(Base):
+    __tablename__ = "online_interaction_buffer"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    state = Column(ARRAY(Float), nullable=False)
+    action = Column(Integer, nullable=False)
+    reward = Column(Float, nullable=False)
+    next_state = Column(ARRAY(Float), nullable=False)
+    done = Column(Boolean, nullable=False, default=False)
+    consumed = Column(Boolean, nullable=False, default=False, index=True)
+    timestamp = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+
+class FinetuneRun(Base):
+    __tablename__ = "finetune_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_policy_version_id = Column(Integer, ForeignKey("policy_versions.id"), nullable=True)
+    status = Column(String(20), nullable=False, default="pending")
+    n_interactions_used = Column(Integer, nullable=False, default=0)
+    loss_before = Column(Float, nullable=True)
+    loss_after = Column(Float, nullable=True)
+    reward_before = Column(Float, nullable=True)
+    reward_after = Column(Float, nullable=True)
+    started_at = Column(DateTime, server_default=func.now())
+    completed_at = Column(DateTime, nullable=True)
+
+
+class PerfReportRun(Base):
+    __tablename__ = "perf_report_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset_size = Column(Integer, nullable=False)
+    algorithm = Column(String(50), nullable=False)
+    training_time_seconds = Column(Float, nullable=False)
+    convergence_epoch = Column(Integer, nullable=True)
+    final_reward = Column(Float, nullable=False)
+    total_epochs_run = Column(Integer, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())

@@ -102,3 +102,24 @@ SHIFT_DETECTION_CONFIG = {
     "composite_retrain_threshold": 4.0,
     "max_snapshots_per_run": 5,
 }
+
+FINETUNE_CONFIG = {
+    "interval_seconds": 3600,
+    "min_buffer_size": 500,
+    "epochs": 5,
+    "steps_per_epoch": 100,
+    "batch_size": 128,
+    "lr": 1e-4,
+    "alpha": 0.5,
+    "auto_promote": False,
+}
+
+AB_TEST_CONFIG = {
+    "aggregation_interval_seconds": 60,
+    "window_minutes": 5,
+}
+
+BENCHMARK_CONFIG = {
+    "default_sizes": [10000, 50000, 100000, 500000, 1000000],
+    "default_epochs": 50,
+}

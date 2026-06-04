@@ -1179,3 +1179,388 @@ async function loadVersionComparison() {
         console.error('Error loading version comparison:', e);
     }
 }
+
+
+// =============================================
+// Recommendation Service Simulator
+// =============================================
+
+async function simulateUser() {
+    const state = Array.from({length: 10}, () => Math.random());
+    const sum = state.reduce((a, b) => a + b, 0);
+    const normalizedState = state.map(s => s / sum);
+
+    try {
+        const res = await fetch(`${API_BASE}/recommend/predict`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                user_state: normalizedState,
+                top_k: 5,
+                session_id: 'sim-' + Date.now()
+            })
+        });
+        const data = await res.json();
+
+        let html = '<div class="recommend-items">';
+        data.items.forEach((item, i) => {
+            const cat = Math.floor(item / 10);
+            html += `<div class="recommend-item">
+                <span>物品 #${item} (类别${cat})</span>
+                <span class="score">Q=${data.scores[i].toFixed(3)}</span>
+                <button class="btn-click" onclick="recordClick(${data.impression_id}, ${item}, true)">点击</button>
+                <button class="btn-skip" onclick="recordClick(${data.impression_id}, ${item}, false)">跳过</button>
+            </div>`;
+        });
+        html += '</div>';
+        document.getElementById('recommend-result').innerHTML = html;
+
+        const groupHtml = data.group
+            ? `<span class="group-badge group-${data.group.toLowerCase()}">Group ${data.group} (${data.group === 'A' ? 'CQL' : 'Random'})</span>`
+            : '<span class="group-badge">无实验</span>';
+        document.getElementById('recommend-group').innerHTML = groupHtml;
+    } catch (e) {
+        console.error('Recommend error:', e);
+    }
+}
+
+async function simulateBatch(n) {
+    for (let i = 0; i < n; i++) {
+        const state = Array.from({length: 10}, () => Math.random());
+        const sum = state.reduce((a, b) => a + b, 0);
+        const normalizedState = state.map(s => s / sum);
+
+        try {
+            const res = await fetch(`${API_BASE}/recommend/predict`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    user_state: normalizedState,
+                    top_k: 5,
+                    session_id: 'batch-' + Date.now() + '-' + i
+                })
+            });
+            const data = await res.json();
+
+            if (data.impression_id) {
+                const clickItem = data.items[Math.floor(Math.random() * data.items.length)];
+                const clicked = Math.random() < 0.3;
+                await fetch(`${API_BASE}/recommend/feedback`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        impression_id: data.impression_id,
+                        item_id: clickItem,
+                        clicked: clicked
+                    })
+                });
+            }
+        } catch (e) {}
+    }
+    document.getElementById('recommend-result').innerHTML = `<div class="recommend-items"><span>完成 ${n} 次模拟请求</span></div>`;
+    loadABSummary();
+}
+
+async function recordClick(impressionId, itemId, clicked) {
+    if (!impressionId) return;
+    try {
+        await fetch(`${API_BASE}/recommend/feedback`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                impression_id: impressionId,
+                item_id: itemId,
+                clicked: clicked
+            })
+        });
+    } catch (e) {}
+}
+
+async function loadPolicyInfo() {
+    try {
+        const res = await fetch(`${API_BASE}/recommend/policy_info`);
+        const data = await res.json();
+        const el = document.getElementById('policy-status');
+        if (data.is_loaded) {
+            el.innerHTML = `<span style="color:#6bcf7f">已加载</span> | 算法: ${data.algorithm || '-'} | 版本ID: ${data.policy_version_id || 'fallback'}`;
+        } else {
+            el.innerHTML = '<span style="color:#ff6b6b">未加载 (使用随机策略)</span>';
+        }
+    } catch (e) {}
+}
+
+
+// =============================================
+// A/B Testing
+// =============================================
+
+let ctrChart = null;
+let ctrPollingInterval = null;
+let activeExperimentId = null;
+
+function initCTRChart() {
+    const ctx = document.getElementById('chart-ctr').getContext('2d');
+    ctrChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [
+            { label: 'Group A (CQL)', data: [], borderColor: '#ff6b6b', fill: false, tension: 0.3 },
+            { label: 'Group B (Random)', data: [], borderColor: '#ffd93d', fill: false, tension: 0.3 },
+        ]},
+        options: {
+            responsive: true,
+            plugins: { legend: { labels: { color: '#aaa' } } },
+            scales: {
+                x: { title: { display: true, text: '时间窗口', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+                y: { title: { display: true, text: 'CTR', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' }, min: 0, max: 1 },
+            }
+        }
+    });
+}
+
+async function createABExperiment() {
+    const name = document.getElementById('ab-name').value;
+    const split = parseFloat(document.getElementById('ab-split').value);
+    try {
+        const res = await fetch(`${API_BASE}/ab/experiments`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ name, traffic_split: split })
+        });
+        const data = await res.json();
+        activeExperimentId = data.id;
+        startCTRPolling();
+        loadABExperiments();
+    } catch (e) {
+        console.error('Create AB error:', e);
+    }
+}
+
+async function stopABExperiment() {
+    if (!activeExperimentId) return;
+    try {
+        await fetch(`${API_BASE}/ab/experiments/${activeExperimentId}/status?status=completed`, { method: 'PUT' });
+        if (ctrPollingInterval) clearInterval(ctrPollingInterval);
+        loadABExperiments();
+    } catch (e) {}
+}
+
+async function loadABExperiments() {
+    try {
+        const res = await fetch(`${API_BASE}/ab/experiments`);
+        const experiments = await res.json();
+        let html = '';
+        experiments.forEach(exp => {
+            const statusClass = exp.status === 'running' ? 'style="color:#6bcf7f"' : '';
+            html += `<div><span ${statusClass}>[${exp.status}]</span> ${exp.name} (split: ${exp.traffic_split})
+                     <button onclick="activeExperimentId=${exp.id};startCTRPolling();loadABSummary();">查看</button></div>`;
+        });
+        document.getElementById('ab-experiments-list').innerHTML = html || '无实验';
+    } catch (e) {}
+}
+
+function startCTRPolling() {
+    if (ctrPollingInterval) clearInterval(ctrPollingInterval);
+    updateCTRChart();
+    ctrPollingInterval = setInterval(updateCTRChart, 5000);
+}
+
+async function updateCTRChart() {
+    if (!activeExperimentId) return;
+    try {
+        const res = await fetch(`${API_BASE}/ab/experiments/${activeExperimentId}/ctr?limit=50`);
+        const data = await res.json();
+
+        const labelsSet = [...new Set(data.map(d => d.window_start.slice(11, 19)))];
+        const groupA = data.filter(d => d.group_name === 'A');
+        const groupB = data.filter(d => d.group_name === 'B');
+
+        ctrChart.data.labels = labelsSet;
+        ctrChart.data.datasets[0].data = groupA.map(d => d.ctr);
+        ctrChart.data.datasets[1].data = groupB.map(d => d.ctr);
+        ctrChart.update('none');
+    } catch (e) {}
+}
+
+async function loadABSummary() {
+    if (!activeExperimentId) return;
+    try {
+        const res = await fetch(`${API_BASE}/ab/experiments/${activeExperimentId}/summary`);
+        const data = await res.json();
+
+        document.getElementById('ab-ctr-a').textContent = (data.group_a_ctr * 100).toFixed(2) + '%';
+        document.getElementById('ab-impressions-a').textContent = `${data.group_a_impressions} impressions, ${data.group_a_clicks} clicks`;
+        document.getElementById('ab-ctr-b').textContent = (data.group_b_ctr * 100).toFixed(2) + '%';
+        document.getElementById('ab-impressions-b').textContent = `${data.group_b_impressions} impressions, ${data.group_b_clicks} clicks`;
+        document.getElementById('ab-lift').textContent = `+${data.lift_percent.toFixed(1)}%`;
+        document.getElementById('ab-pvalue').textContent = data.p_value !== null
+            ? `p=${data.p_value.toFixed(4)} ${data.is_significant ? '✓ 显著' : '× 不显著'}`
+            : '样本不足';
+    } catch (e) {}
+}
+
+
+// =============================================
+// Online Fine-tuning
+// =============================================
+
+let finetunePollingInterval = null;
+
+async function triggerFinetune() {
+    try {
+        await fetch(`${API_BASE}/finetune/trigger`, { method: 'POST' });
+        pollFinetuneStatus();
+    } catch (e) {}
+}
+
+async function pollFinetuneStatus() {
+    try {
+        const res = await fetch(`${API_BASE}/finetune/status`);
+        const data = await res.json();
+        const bar = document.getElementById('finetune-buffer-bar');
+        const status = document.getElementById('finetune-buffer-status');
+        const pct = Math.min(100, (data.buffer_size / 500) * 100);
+        bar.style.width = pct + '%';
+        status.textContent = `Buffer: ${data.buffer_size} / 500${data.is_running ? ' | 微调中...' : ''}`;
+    } catch (e) {}
+}
+
+async function updateFinetuneConfig() {
+    const interval = parseInt(document.getElementById('ft-interval').value);
+    const minBuffer = parseInt(document.getElementById('ft-min-buffer').value);
+    try {
+        await fetch(`${API_BASE}/finetune/config`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ interval_seconds: interval, min_buffer_size: minBuffer })
+        });
+    } catch (e) {}
+}
+
+async function loadFinetuneRuns() {
+    try {
+        const res = await fetch(`${API_BASE}/finetune/runs`);
+        const runs = await res.json();
+        let html = '';
+        runs.slice(0, 10).forEach(r => {
+            const improvement = r.reward_after && r.reward_before
+                ? `(${(r.reward_after - r.reward_before).toFixed(3)})`
+                : '';
+            html += `<div>[${r.status}] #${r.id}: ${r.n_interactions_used}条数据, 奖励变化 ${improvement}</div>`;
+        });
+        document.getElementById('finetune-runs-list').innerHTML = html || '无记录';
+    } catch (e) {}
+}
+
+
+// =============================================
+// Performance Benchmark
+// =============================================
+
+let perfTimeChart = null;
+let perfRewardChart = null;
+
+function initPerfCharts() {
+    const defaultOpts = {
+        responsive: true,
+        plugins: { legend: { labels: { color: '#aaa' } } },
+        scales: {
+            x: { title: { display: true, text: '数据集大小', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+            y: { ticks: { color: '#666' }, grid: { color: '#333' } },
+        }
+    };
+
+    const ctx1 = document.getElementById('chart-perf-time').getContext('2d');
+    perfTimeChart = new Chart(ctx1, {
+        type: 'bar',
+        data: { labels: [], datasets: [{ label: '训练时间 (秒)', data: [], backgroundColor: '#ff6b6b88', borderColor: '#ff6b6b', borderWidth: 1 }] },
+        options: { ...defaultOpts, scales: { ...defaultOpts.scales, y: { ...defaultOpts.scales.y, title: { display: true, text: '时间(s)', color: '#888' } } } }
+    });
+
+    const ctx2 = document.getElementById('chart-perf-reward').getContext('2d');
+    perfRewardChart = new Chart(ctx2, {
+        type: 'line',
+        data: { labels: [], datasets: [{ label: '最终奖励', data: [], borderColor: '#6bcf7f', fill: false, tension: 0.3 }] },
+        options: { ...defaultOpts, scales: { ...defaultOpts.scales, y: { ...defaultOpts.scales.y, title: { display: true, text: '奖励', color: '#888' } } } }
+    });
+}
+
+async function startBenchmark() {
+    const sizes = document.getElementById('bench-sizes').value.split(',').map(s => parseInt(s.trim()));
+    const epochs = parseInt(document.getElementById('bench-epochs').value);
+    document.getElementById('bench-status').textContent = '运行中...';
+
+    try {
+        await fetch(`${API_BASE}/performance/benchmark/start`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ dataset_sizes: sizes, epochs })
+        });
+        const pollId = setInterval(async () => {
+            const sRes = await fetch(`${API_BASE}/performance/benchmark/status`);
+            const status = await sRes.json();
+            if (!status.is_running) {
+                clearInterval(pollId);
+                document.getElementById('bench-status').textContent = '完成';
+                loadPerfResults();
+            } else {
+                document.getElementById('bench-status').textContent = `运行中: ${status.current_size} ...`;
+            }
+        }, 5000);
+    } catch (e) {
+        document.getElementById('bench-status').textContent = '错误';
+    }
+}
+
+async function loadPerfResults() {
+    try {
+        const res = await fetch(`${API_BASE}/performance/benchmark/results`);
+        const data = await res.json();
+        const entries = data.entries;
+
+        if (!entries.length) return;
+
+        const labels = entries.map(e => e.dataset_size.toLocaleString());
+        const times = entries.map(e => e.training_time_seconds);
+        const rewards = entries.map(e => e.final_reward);
+
+        perfTimeChart.data.labels = labels;
+        perfTimeChart.data.datasets[0].data = times;
+        perfTimeChart.update('none');
+
+        perfRewardChart.data.labels = labels;
+        perfRewardChart.data.datasets[0].data = rewards;
+        perfRewardChart.update('none');
+
+        let html = '';
+        entries.forEach(e => {
+            const timePer1K = (e.training_time_seconds / (e.dataset_size / 1000)).toFixed(2);
+            html += `<tr>
+                <td>${e.dataset_size.toLocaleString()}</td>
+                <td>${e.algorithm}</td>
+                <td>${e.training_time_seconds.toFixed(1)}</td>
+                <td>${e.convergence_epoch || '-'}</td>
+                <td>${e.final_reward.toFixed(3)}</td>
+                <td>${timePer1K}s</td>
+            </tr>`;
+        });
+        document.getElementById('perf-tbody').innerHTML = html;
+    } catch (e) {}
+}
+
+
+// =============================================
+// Initialization
+// =============================================
+
+document.addEventListener('DOMContentLoaded', () => {
+    initCTRChart();
+    initPerfCharts();
+    loadPolicyInfo();
+    loadABExperiments();
+    pollFinetuneStatus();
+    loadFinetuneRuns();
+    loadPerfResults();
+
+    setInterval(pollFinetuneStatus, 10000);
+    setInterval(loadFinetuneRuns, 30000);
+});

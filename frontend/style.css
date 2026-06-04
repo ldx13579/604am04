@@ -567,3 +567,112 @@ label input[type="text"] {
     font-size: 0.75rem;
     font-weight: 600;
 }
+
+/* Recommendation Service */
+.recommend-result {
+    margin-top: 10px;
+}
+
+.recommend-items {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.recommend-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 6px 10px;
+    border-radius: 4px;
+}
+
+.recommend-item .score {
+    color: #00d4ff;
+    font-size: 0.8rem;
+}
+
+.btn-click {
+    background: #27ae60;
+    color: white;
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    border-radius: 3px;
+    border: none;
+    cursor: pointer;
+}
+
+.btn-skip {
+    background: #666;
+    color: white;
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    border-radius: 3px;
+    border: none;
+    cursor: pointer;
+}
+
+.recommend-group {
+    margin-top: 8px;
+}
+
+.group-badge {
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.group-a {
+    background: rgba(255, 107, 107, 0.2);
+    border: 1px solid #ff6b6b;
+    color: #ff6b6b;
+}
+
+.group-b {
+    background: rgba(255, 217, 61, 0.2);
+    border: 1px solid #ffd93d;
+    color: #ffd93d;
+}
+
+/* A/B Testing */
+.btn-ab-create {
+    background: #27ae60;
+    color: white;
+}
+
+.btn-ab-stop {
+    background: #e74c3c;
+    color: white;
+}
+
+.ab-summary {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    margin: 15px 0;
+}
+
+.btn-recommend {
+    background: #00d4ff;
+    color: #111;
+    font-weight: 600;
+}
+
+.btn-recommend-batch {
+    background: #a55eea;
+    color: white;
+}
+
+/* Fine-tuning */
+.btn-finetune {
+    background: #f39c12;
+    color: white;
+}
+
+/* Performance Benchmark */
+.btn-benchmark {
+    background: #2980b9;
+    color: white;
+}

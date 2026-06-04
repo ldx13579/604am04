@@ -67,9 +67,10 @@ class ReplayBuffer:
     and periodically rotates to a new random chunk for diversity.
     """
 
-    def __init__(self, capacity: int = 500_000, chunk_size: int = CHUNK_SIZE):
+    def __init__(self, capacity: int = 500_000, chunk_size: int = CHUNK_SIZE, db_limit: int = None):
         self.capacity = capacity
         self.chunk_size = chunk_size
+        self.db_limit = db_limit
         self.states = None
         self.actions = None
         self.rewards = None
@@ -92,7 +93,10 @@ class ReplayBuffer:
         if self.db_total == 0:
             return
 
-        load_total = min(self.capacity, self.db_total)
+        effective_total = self.db_total
+        if self.db_limit:
+            effective_total = min(effective_total, self.db_limit)
+        load_total = min(self.capacity, effective_total)
         all_states = []
         all_actions = []
         all_rewards = []

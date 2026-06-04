@@ -228,6 +228,126 @@
         </table>
     </section>
 
+    <!-- Recommendation Service Simulator -->
+    <section class="controls">
+        <div class="control-group" style="flex:2;">
+            <h3>推荐服务模拟</h3>
+            <button class="btn-recommend" onclick="simulateUser()">模拟用户请求</button>
+            <button class="btn-recommend-batch" onclick="simulateBatch(20)">批量模拟 (20次)</button>
+            <div id="recommend-result" class="recommend-result"></div>
+            <div id="recommend-group" class="recommend-group"></div>
+        </div>
+        <div class="control-group">
+            <h3>策略状态</h3>
+            <div id="policy-status">未加载</div>
+            <button onclick="loadPolicyInfo()">刷新状态</button>
+        </div>
+    </section>
+
+    <!-- A/B Testing Dashboard -->
+    <section class="controls">
+        <div class="control-group">
+            <h3>A/B 测试</h3>
+            <label>实验名称: <input type="text" id="ab-name" value="cql_vs_random" placeholder="实验名"></label>
+            <label>流量分配 (A): <input type="number" id="ab-split" value="0.5" step="0.1" min="0.1" max="0.9"></label>
+            <button class="btn-ab-create" onclick="createABExperiment()">创建实验</button>
+            <button class="btn-ab-stop" onclick="stopABExperiment()">结束实验</button>
+        </div>
+        <div class="control-group" style="flex:2;">
+            <h3>A/B 实验列表</h3>
+            <div id="ab-experiments-list"></div>
+        </div>
+    </section>
+
+    <section class="charts-grid">
+        <div class="chart-container chart-wide">
+            <h3>点击率对比 (CTR: CQL vs Random)</h3>
+            <canvas id="chart-ctr"></canvas>
+        </div>
+    </section>
+
+    <section class="runs-table">
+        <h3>A/B 测试统计</h3>
+        <div id="ab-summary" class="ab-summary">
+            <div class="stat-card stat-in-dist">
+                <span class="stat-label">Group A (CQL)</span>
+                <span class="stat-value" id="ab-ctr-a">-</span>
+                <span class="stat-sub" id="ab-impressions-a">0 impressions</span>
+            </div>
+            <div class="stat-card stat-ood">
+                <span class="stat-label">Group B (Random)</span>
+                <span class="stat-value" id="ab-ctr-b">-</span>
+                <span class="stat-sub" id="ab-impressions-b">0 impressions</span>
+            </div>
+            <div class="stat-card stat-gap">
+                <span class="stat-label">提升 / P-value</span>
+                <span class="stat-value" id="ab-lift">-</span>
+                <span class="stat-sub" id="ab-pvalue">-</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- Online Fine-tuning -->
+    <section class="controls">
+        <div class="control-group">
+            <h3>在线微调</h3>
+            <button class="btn-finetune" onclick="triggerFinetune()">手动触发微调</button>
+            <div class="progress-container">
+                <div class="progress-bar" id="finetune-buffer-bar" style="width:0%"></div>
+            </div>
+            <span id="finetune-buffer-status">Buffer: 0 / 500</span>
+        </div>
+        <div class="control-group">
+            <h3>微调配置</h3>
+            <label>间隔(秒): <input type="number" id="ft-interval" value="3600" step="600"></label>
+            <label>最小缓冲: <input type="number" id="ft-min-buffer" value="500" step="100"></label>
+            <button onclick="updateFinetuneConfig()">更新配置</button>
+        </div>
+        <div class="control-group" style="flex:2;">
+            <h3>微调历史</h3>
+            <div id="finetune-runs-list"></div>
+        </div>
+    </section>
+
+    <!-- Performance Benchmark -->
+    <section class="controls">
+        <div class="control-group">
+            <h3>性能基准测试</h3>
+            <label>数据集大小: <input type="text" id="bench-sizes" value="10000,50000,100000,500000"></label>
+            <label>Epochs: <input type="number" id="bench-epochs" value="50" step="10"></label>
+            <button class="btn-benchmark" onclick="startBenchmark()">运行基准测试</button>
+            <span id="bench-status">就绪</span>
+        </div>
+    </section>
+
+    <section class="charts-grid">
+        <div class="chart-container">
+            <h3>训练时间 vs 数据集规模</h3>
+            <canvas id="chart-perf-time"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>最终奖励 vs 数据集规模</h3>
+            <canvas id="chart-perf-reward"></canvas>
+        </div>
+    </section>
+
+    <section class="runs-table">
+        <h3>性能报告</h3>
+        <table id="perf-table">
+            <thead>
+                <tr>
+                    <th>数据集大小</th>
+                    <th>算法</th>
+                    <th>训练时间(s)</th>
+                    <th>收敛Epoch</th>
+                    <th>最终奖励</th>
+                    <th>时间/1K数据</th>
+                </tr>
+            </thead>
+            <tbody id="perf-tbody"></tbody>
+        </table>
+    </section>
+
     <script src="app.js"></script>
 </body>
 </html>
