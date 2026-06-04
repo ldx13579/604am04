@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>离线强化学习推荐系统策略模拟器</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>Offline RL Recommendation Strategy Simulator</h1>
+        <p class="subtitle">CQL vs DQN vs Behavior Cloning</p>
+    </header>
+
+    <section class="controls">
+        <div class="control-group">
+            <h3>数据生成</h3>
+            <button id="btn-generate" onclick="generateData()">生成100万离线数据</button>
+            <div class="progress-container">
+                <div class="progress-bar" id="data-progress"></div>
+            </div>
+            <span id="data-status">就绪</span>
+        </div>
+        <div class="control-group">
+            <h3>训练控制</h3>
+            <button class="btn-cql" onclick="startTraining('cql')">训练 CQL</button>
+            <button class="btn-dqn" onclick="startTraining('dqn')">训练 DQN</button>
+            <button class="btn-bc" onclick="startTraining('behavior_cloning')">训练 BC</button>
+        </div>
+        <div class="control-group">
+            <h3>超参数 (CQL)</h3>
+            <label>Alpha: <input type="number" id="param-alpha" value="1.0" step="0.1" min="0.1"></label>
+            <label>LR: <input type="number" id="param-lr" value="0.0003" step="0.0001"></label>
+            <label>Epochs: <input type="number" id="param-epochs" value="200" step="10" min="10"></label>
+        </div>
+    </section>
+
+    <section class="charts-grid">
+        <div class="chart-container">
+            <h3>训练损失 (Loss vs Epoch)</h3>
+            <canvas id="chart-loss"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>累积奖励对比 (Cumulative Reward)</h3>
+            <canvas id="chart-reward"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>Q值演化 (Q-value Mean)</h3>
+            <canvas id="chart-qvalue"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>CQL 保守惩罚项</h3>
+            <canvas id="chart-penalty"></canvas>
+        </div>
+    </section>
+
+    <section class="runs-table">
+        <h3>训练记录</h3>
+        <table id="runs-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>算法</th>
+                    <th>状态</th>
+                    <th>Epochs</th>
+                    <th>最优奖励</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="runs-tbody"></tbody>
+        </table>
+    </section>
+
+    <script src="app.js"></script>
+</body>
+</html>
