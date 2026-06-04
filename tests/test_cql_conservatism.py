@@ -272,6 +272,105 @@ class TestCQLRNNConservatism:
             f"CQL_RNN penalty should be positive, got {metrics['cql_penalty']:.4f}"
         )
 
+    def test_cql_rnn_with_realistic_sequences(self):
+        """CQL_RNN with realistic user sequences (varying clicks, dwell, purchases)
+        should produce significantly lower Q-values for OOD actions."""
+        agent = CQL_RNN(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            alpha=5.0,
+            lr=1e-3,
+            lstm_hidden_size=64,
+            lstm_num_layers=1,
+            seq_len=self.seq_len,
+        )
+
+        for _ in range(300):
+            batch = generate_synthetic_sequence_batch(
+                batch_size=64,
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+                seq_len=self.seq_len,
+                in_dist_actions=self.in_dist_actions,
+            )
+            agent.update(batch)
+
+        n_test_states = 30
+        all_in_dist_q = []
+        all_ood_q = []
+
+        for _ in range(n_test_states):
+            test_state = np.random.randn(self.state_dim).astype(np.float32)
+            sequence = {
+                "actions": np.random.choice(self.in_dist_actions, size=self.seq_len).tolist(),
+                "clicked": (np.random.random(self.seq_len) > 0.4).astype(float).tolist(),
+                "dwell_times": np.random.exponential(3.0, size=self.seq_len).tolist(),
+                "purchased": (np.random.random(self.seq_len) > 0.85).astype(float).tolist(),
+                "states": np.random.randn(self.seq_len, self.state_dim).tolist(),
+            }
+            q_values = agent.get_q_distribution(test_state, sequence)
+            all_in_dist_q.extend(q_values[self.in_dist_actions].tolist())
+            all_ood_q.extend(q_values[self.ood_actions].tolist())
+
+        in_dist_arr = np.array(all_in_dist_q)
+        ood_arr = np.array(all_ood_q)
+
+        in_dist_mean = in_dist_arr.mean()
+        ood_mean = ood_arr.mean()
+        pooled_std = np.sqrt((in_dist_arr.std() ** 2 + ood_arr.std() ** 2) / 2)
+        effect_size = (in_dist_mean - ood_mean) / max(pooled_std, 1e-8)
+
+        assert ood_mean < in_dist_mean, (
+            f"CQL_RNN with sequences: OOD Q ({ood_mean:.4f}) should be < in-dist Q ({in_dist_mean:.4f})"
+        )
+        assert effect_size > 0.2, (
+            f"Effect size between in-dist and OOD should be meaningful: "
+            f"got {effect_size:.4f} (in_dist_mean={in_dist_mean:.4f}, ood_mean={ood_mean:.4f})"
+        )
+
+    def test_cql_rnn_default_vs_sequence_encoding(self):
+        """Q-values should differ based on whether user history is provided.
+        An agent with history context should produce different action rankings
+        than one using the default embedding."""
+        agent = CQL_RNN(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            alpha=3.0,
+            lr=1e-3,
+            lstm_hidden_size=64,
+            lstm_num_layers=1,
+            seq_len=self.seq_len,
+        )
+
+        for _ in range(200):
+            batch = generate_synthetic_sequence_batch(
+                batch_size=64,
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+                seq_len=self.seq_len,
+                in_dist_actions=self.in_dist_actions,
+            )
+            agent.update(batch)
+
+        test_state = np.random.randn(self.state_dim).astype(np.float32)
+
+        q_no_seq = agent.get_q_distribution(test_state)
+
+        sequence = {
+            "actions": np.random.choice(self.in_dist_actions, size=self.seq_len).tolist(),
+            "clicked": [1.0] * self.seq_len,
+            "dwell_times": [5.0] * self.seq_len,
+            "purchased": [0.0] * (self.seq_len - 1) + [1.0],
+            "states": np.random.randn(self.seq_len, self.state_dim).tolist(),
+        }
+        q_with_seq = agent.get_q_distribution(test_state, sequence)
+
+        diff = np.abs(q_with_seq - q_no_seq).mean()
+        assert diff > 1e-4, (
+            f"Q-values should change with user history encoding, "
+            f"but mean absolute difference is only {diff:.6f}"
+        )
+
 
 class TestUserStateEncoder:
     """Tests for the LSTM-based user state encoder."""

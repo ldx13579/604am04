@@ -71,8 +71,33 @@
             <h3>Q值分布直方图 (In-Distribution vs OOD)</h3>
             <div class="q-dist-controls">
                 <label>选择训练Run: <select id="q-dist-run-select" onchange="loadQDistribution()"></select></label>
+                <button class="btn-histogram" onclick="loadQHistogram()">加载分布直方图</button>
             </div>
             <canvas id="chart-q-distribution"></canvas>
+        </div>
+    </section>
+
+    <section class="charts-grid">
+        <div class="chart-container chart-wide">
+            <h3>Q值分布对比直方图 (多状态聚合)</h3>
+            <div class="q-hist-stats" id="q-hist-stats" style="display:none;">
+                <div class="stat-card stat-in-dist">
+                    <span class="stat-label">In-Distribution</span>
+                    <span class="stat-value" id="stat-in-dist-mean">-</span>
+                    <span class="stat-sub" id="stat-in-dist-std">-</span>
+                </div>
+                <div class="stat-card stat-ood">
+                    <span class="stat-label">OOD (分布外)</span>
+                    <span class="stat-value" id="stat-ood-mean">-</span>
+                    <span class="stat-sub" id="stat-ood-std">-</span>
+                </div>
+                <div class="stat-card stat-gap">
+                    <span class="stat-label">保守性差距</span>
+                    <span class="stat-value" id="stat-gap">-</span>
+                    <span class="stat-sub" id="stat-effect-size">-</span>
+                </div>
+            </div>
+            <canvas id="chart-q-histogram"></canvas>
         </div>
     </section>
 
@@ -103,12 +128,20 @@
                     <th>指标</th>
                     <th>值</th>
                     <th>阈值</th>
+                    <th>严重程度</th>
                     <th>告警</th>
                     <th>触发重训</th>
                 </tr>
             </thead>
             <tbody id="shift-tbody"></tbody>
         </table>
+    </section>
+
+    <section class="charts-grid">
+        <div class="chart-container chart-wide">
+            <h3>偏移检测时间线 (Shift Detection Timeline)</h3>
+            <canvas id="chart-shift-timeline"></canvas>
+        </div>
     </section>
 
     <script src="app.js"></script>

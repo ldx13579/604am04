@@ -248,6 +248,8 @@ async function refreshRuns() {
 document.addEventListener('DOMContentLoaded', () => {
     initCharts();
     initQDistChart();
+    initQHistogramChart();
+    initShiftTimelineChart();
     refreshRuns();
     loadShiftRecords();
     loadAlerts();
@@ -403,18 +405,186 @@ async function loadShiftRecords() {
         const res = await fetch(`${API_BASE}/shift/records?limit=20`);
         const records = await res.json();
         const tbody = document.getElementById('shift-tbody');
-        tbody.innerHTML = records.map(r => `
+        tbody.innerHTML = records.map(r => {
+            const severity = r.is_alert ? (r.metric_value >= r.threshold * 2 ? 'severe' : 'warning') : 'normal';
+            const severityBadge = severity === 'severe'
+                ? '<span class="badge-severe">严重</span>'
+                : severity === 'warning'
+                    ? '<span class="badge-warning">警告</span>'
+                    : '<span class="badge-ok">正常</span>';
+            return `
             <tr class="${r.is_alert ? 'row-alert' : ''}">
                 <td>${r.detection_time ? new Date(r.detection_time).toLocaleString() : '-'}</td>
                 <td>${r.shift_type}</td>
                 <td>${r.metric_name}</td>
                 <td>${r.metric_value.toFixed(4)}</td>
                 <td>${r.threshold.toFixed(4)}</td>
+                <td>${severityBadge}</td>
                 <td>${r.is_alert ? '<span class="badge-alert">告警</span>' : '<span class="badge-ok">正常</span>'}</td>
-                <td>${r.triggered_retrain ? '是 (#' + r.retrain_run_id + ')' : '否'}</td>
-            </tr>
-        `).join('');
+                <td>${r.triggered_retrain ? '<span class="badge-retrain">是 (#' + r.retrain_run_id + ')</span>' : '否'}</td>
+            </tr>`;
+        }).join('');
+
+        updateShiftTimeline(records);
     } catch (e) {
         console.error(e);
     }
+}
+
+// ===== Q-Value Binned Histogram =====
+let qHistogramChart = null;
+
+function initQHistogramChart() {
+    const ctx = document.getElementById('chart-q-histogram');
+    qHistogramChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: {
+                legend: { labels: { color: '#aaa' } },
+                title: { display: true, text: 'Q值分布: In-Distribution (蓝) vs OOD (红)', color: '#aaa' },
+            },
+            scales: {
+                x: {
+                    title: { display: true, text: 'Q-value Range', color: '#888' },
+                    ticks: { color: '#666', maxTicksLimit: 15 },
+                    grid: { color: '#333' },
+                },
+                y: {
+                    title: { display: true, text: 'Count', color: '#888' },
+                    ticks: { color: '#666' },
+                    grid: { color: '#333' },
+                },
+            },
+        },
+    });
+}
+
+async function loadQHistogram() {
+    const select = document.getElementById('q-dist-run-select');
+    const runId = select.value;
+    if (!runId) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/shift/q_histogram/${runId}?n_states=50&n_bins=30`);
+        if (!res.ok) {
+            console.error('Failed to load Q histogram');
+            return;
+        }
+        const data = await res.json();
+
+        const binLabels = [];
+        for (let i = 0; i < data.bin_edges.length - 1; i++) {
+            binLabels.push(((data.bin_edges[i] + data.bin_edges[i + 1]) / 2).toFixed(3));
+        }
+
+        qHistogramChart.data = {
+            labels: binLabels,
+            datasets: [
+                {
+                    label: `In-Distribution (均值=${data.in_dist_mean.toFixed(4)})`,
+                    data: data.in_dist_counts,
+                    backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1,
+                },
+                {
+                    label: `OOD (均值=${data.ood_mean.toFixed(4)})`,
+                    data: data.ood_counts,
+                    backgroundColor: 'rgba(255, 99, 132, 0.6)',
+                    borderColor: 'rgba(255, 99, 132, 1)',
+                    borderWidth: 1,
+                },
+            ],
+        };
+        qHistogramChart.update();
+
+        const statsPanel = document.getElementById('q-hist-stats');
+        statsPanel.style.display = 'flex';
+        document.getElementById('stat-in-dist-mean').textContent = `均值: ${data.in_dist_mean.toFixed(4)}`;
+        document.getElementById('stat-in-dist-std').textContent = `标准差: ${data.in_dist_std.toFixed(4)}`;
+        document.getElementById('stat-ood-mean').textContent = `均值: ${data.ood_mean.toFixed(4)}`;
+        document.getElementById('stat-ood-std').textContent = `标准差: ${data.ood_std.toFixed(4)}`;
+        const gap = data.in_dist_mean - data.ood_mean;
+        const pooledStd = Math.sqrt((data.in_dist_std ** 2 + data.ood_std ** 2) / 2);
+        const effectSize = pooledStd > 0 ? gap / pooledStd : 0;
+        document.getElementById('stat-gap').textContent = `差距: ${gap.toFixed(4)}`;
+        document.getElementById('stat-effect-size').textContent = `效应量(Cohen's d): ${effectSize.toFixed(3)}`;
+    } catch (e) {
+        console.error('Error loading Q histogram:', e);
+    }
+}
+
+// ===== Shift Detection Timeline Chart =====
+let shiftTimelineChart = null;
+
+function initShiftTimelineChart() {
+    const ctx = document.getElementById('chart-shift-timeline');
+    shiftTimelineChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: {
+                legend: { labels: { color: '#aaa' } },
+                title: { display: true, text: '偏移指标时间线 (超过阈值线=告警)', color: '#aaa' },
+            },
+            scales: {
+                x: {
+                    title: { display: true, text: '检测时间', color: '#888' },
+                    ticks: { color: '#666', maxTicksLimit: 10 },
+                    grid: { color: '#333' },
+                },
+                y: {
+                    title: { display: true, text: '指标值 / 阈值比', color: '#888' },
+                    ticks: { color: '#666' },
+                    grid: { color: '#333' },
+                },
+            },
+        },
+    });
+}
+
+function updateShiftTimeline(records) {
+    if (!records || records.length === 0) return;
+
+    const sorted = [...records].reverse();
+    const shiftTypes = [...new Set(sorted.map(r => r.shift_type))];
+    const typeColors = {
+        action_distribution: '#ff6b6b',
+        reward_distribution: '#ffd93d',
+        state_distribution: '#6bcf7f',
+        new_items: '#a55eea',
+    };
+
+    const labels = sorted.map(r => r.detection_time ? new Date(r.detection_time).toLocaleTimeString() : '-');
+    const datasets = shiftTypes.map(type => {
+        const data = sorted.map(r => r.shift_type === type ? r.metric_value / r.threshold : null);
+        return {
+            label: type,
+            data,
+            borderColor: typeColors[type] || '#fff',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            pointRadius: 3,
+            tension: 0.3,
+            spanGaps: true,
+        };
+    });
+
+    datasets.push({
+        label: '告警阈值',
+        data: sorted.map(() => 1.0),
+        borderColor: 'rgba(255, 99, 132, 0.5)',
+        borderDash: [5, 5],
+        borderWidth: 2,
+        pointRadius: 0,
+        backgroundColor: 'transparent',
+    });
+
+    shiftTimelineChart.data = { labels, datasets };
+    shiftTimelineChart.update();
 }
