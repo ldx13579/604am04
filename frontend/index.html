@@ -10,7 +10,7 @@
 <body>
     <header>
         <h1>Offline RL Recommendation Strategy Simulator</h1>
-        <p class="subtitle">CQL vs DQN vs Behavior Cloning vs CQL+RNN</p>
+        <p class="subtitle">CQL vs DQN vs Behavior Cloning vs CQL+RNN vs Ensemble CQL</p>
     </header>
 
     <section class="controls">
@@ -40,11 +40,43 @@
             <button class="btn-shift" onclick="runShiftDetection()">运行偏移检测</button>
             <button class="btn-shift-new" onclick="runShiftWithNewItems()">模拟新物品加入</button>
         </div>
+        <div class="control-group">
+            <h3>Ensemble CQL</h3>
+            <button class="btn-ensemble" onclick="startTraining('ensemble_cql')">训练 Ensemble CQL</button>
+            <label>不确定性阈值: <input type="number" id="param-uncertainty" value="1.0" step="0.1" min="0.1"></label>
+        </div>
+        <div class="control-group">
+            <h3>离线策略评估 (FQE)</h3>
+            <label>源Run ID: <input type="number" id="fqe-source-run" value="1" min="1"></label>
+            <button class="btn-fqe" onclick="startFQE()">运行FQE评估</button>
+        </div>
+        <div class="control-group">
+            <h3>Alpha对比</h3>
+            <label>Alpha值 (逗号分隔): <input type="text" id="alpha-sweep-values" value="0.1,0.5,1.0,2.0,5.0"></label>
+            <button class="btn-sweep" onclick="startAlphaSweep()">启动Alpha Sweep</button>
+            <button class="btn-compare" onclick="loadAlphaComparison()">加载对比结果</button>
+        </div>
     </section>
 
     <section id="shift-alerts" class="alerts-panel" style="display:none;">
         <h3>⚠ 分布偏移告警</h3>
         <div id="alerts-container"></div>
+    </section>
+
+    <section class="tb-toolbar">
+        <div class="tb-toolbar-row">
+            <div class="tb-control">
+                <label>平滑系数 (EMA): <input type="range" id="tb-smoothing" min="0" max="0.99" step="0.01" value="0">
+                <span id="tb-smoothing-value">0.00</span></label>
+            </div>
+            <div class="tb-control">
+                <label><input type="checkbox" id="tb-logscale"> Loss对数刻度</label>
+            </div>
+            <div class="tb-control">
+                <span class="tb-label">可见Run:</span>
+                <div id="tb-run-toggles" class="tb-toggles"></div>
+            </div>
+        </div>
     </section>
 
     <section class="charts-grid">
@@ -63,6 +95,33 @@
         <div class="chart-container">
             <h3>CQL 保守惩罚项</h3>
             <canvas id="chart-penalty"></canvas>
+        </div>
+    </section>
+
+    <section class="charts-grid">
+        <div class="chart-container">
+            <h3>集成不确定性 (Ensemble Uncertainty)</h3>
+            <canvas id="chart-uncertainty"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>FQE 策略估值 (Estimated Value)</h3>
+            <canvas id="chart-fqe-value"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>FQE 损失收敛 (FQE Loss)</h3>
+            <canvas id="chart-fqe-loss"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>探索比例 (Exploration Ratio)</h3>
+            <canvas id="chart-exploration"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>子模型损失 (Per-Model Losses)</h3>
+            <canvas id="chart-per-model"></canvas>
+        </div>
+        <div class="chart-container chart-wide">
+            <h3>超参数对比 (Alpha vs Reward/Convergence)</h3>
+            <canvas id="chart-alpha-comparison"></canvas>
         </div>
     </section>
 
@@ -142,6 +201,31 @@
             <h3>偏移检测时间线 (Shift Detection Timeline)</h3>
             <canvas id="chart-shift-timeline"></canvas>
         </div>
+    </section>
+
+    <section class="runs-table">
+        <h3>策略版本管理</h3>
+        <div class="version-controls">
+            <label>Run ID: <input type="number" id="ver-run-id" min="1" value="1"></label>
+            <label>Snapshot ID: <input type="number" id="ver-snapshot-id" min="1" value="1"></label>
+            <label>版本标签: <input type="text" id="ver-tag" value="v1.0" placeholder="v1.0"></label>
+            <label>FQE ID (可选): <input type="number" id="ver-fqe-id" min="0" value="0"></label>
+            <button class="btn-version" onclick="createPolicyVersion()">创建版本</button>
+            <button class="btn-version-compare" onclick="loadVersionComparison()">对比版本</button>
+        </div>
+        <table id="versions-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>版本标签</th>
+                    <th>阶段</th>
+                    <th>算法/Run</th>
+                    <th>FQE评估</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="versions-tbody"></tbody>
+        </table>
     </section>
 
     <script src="app.js"></script>

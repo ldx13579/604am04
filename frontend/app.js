@@ -4,17 +4,21 @@ const COLORS = {
     cql_rnn: '#ff9f43',
     dqn: '#ffd93d',
     behavior_cloning: '#6bcf7f',
+    ensemble_cql: '#a55eea',
 };
 const LABELS = {
     cql: 'CQL',
     cql_rnn: 'CQL+RNN',
     dqn: 'DQN',
     behavior_cloning: 'Behavior Cloning',
+    ensemble_cql: 'Ensemble CQL',
 };
 
 let charts = {};
 let pollingIntervals = {};
 let runData = {};
+let smoothingFactor = 0;
+let hiddenRuns = new Set();
 
 function initCharts() {
     const defaultOpts = {
@@ -98,6 +102,10 @@ async function startTraining(algorithm) {
         epochs: parseInt(document.getElementById('param-epochs').value),
     };
 
+    if (algorithm === 'ensemble_cql') {
+        hyperparameters.uncertainty_threshold = parseFloat(document.getElementById('param-uncertainty').value);
+    }
+
     try {
         const res = await fetch(`${API_BASE}/training/start`, {
             method: 'POST',
@@ -116,6 +124,7 @@ function pollTrainingMetrics(runId, algorithm) {
     if (pollingIntervals[runId]) return;
 
     runData[runId] = { algorithm, epochs: [], losses: [], rewards: [], qvalues: [], penalties: [] };
+    updateRunToggles();
 
     pollingIntervals[runId] = setInterval(async () => {
         try {
@@ -167,20 +176,36 @@ async function loadFullMetrics(runId, algorithm) {
             penalties: data.metrics.map(m => m.cql_penalty || 0),
         };
         updateCharts();
+        updateRunToggles();
+
+        if (data.algorithm === 'ensemble_cql') {
+            loadEnsembleUncertainty(runId);
+            loadExplorationRatio(runId);
+            loadPerModelLosses(runId);
+        }
     } catch (e) {
         console.error(e);
     }
 }
 
+function smoothData(data, factor) {
+    if (factor <= 0 || data.length === 0) return data;
+    const result = [data[0]];
+    for (let i = 1; i < data.length; i++) {
+        result.push(factor * result[i - 1] + (1 - factor) * data[i]);
+    }
+    return result;
+}
+
 function updateCharts() {
-    const runIds = Object.keys(runData);
+    const runIds = Object.keys(runData).filter(rid => !hiddenRuns.has(rid));
 
     function buildDatasets(field) {
         return runIds.map(rid => {
             const rd = runData[rid];
             return {
                 label: `${LABELS[rd.algorithm] || rd.algorithm} (#${rid})`,
-                data: rd[field],
+                data: smoothData(rd[field], smoothingFactor),
                 borderColor: COLORS[rd.algorithm] || '#fff',
                 backgroundColor: 'transparent',
                 borderWidth: 2,
@@ -203,13 +228,13 @@ function updateCharts() {
     charts.qvalue.update('none');
 
     const penaltyDatasets = runIds
-        .filter(rid => runData[rid].algorithm === 'cql')
+        .filter(rid => ['cql', 'cql_rnn', 'ensemble_cql'].includes(runData[rid].algorithm))
         .map(rid => {
             const rd = runData[rid];
             return {
-                label: `CQL Penalty (#${rid})`,
-                data: rd.penalties,
-                borderColor: COLORS.cql,
+                label: `${LABELS[rd.algorithm] || rd.algorithm} Penalty (#${rid})`,
+                data: smoothData(rd.penalties, smoothingFactor),
+                borderColor: COLORS[rd.algorithm] || COLORS.cql,
                 backgroundColor: 'transparent',
                 borderWidth: 2,
                 pointRadius: 0,
@@ -237,7 +262,7 @@ async function refreshRuns() {
         `).join('');
 
         const select = document.getElementById('q-dist-run-select');
-        const completedRuns = runs.filter(r => r.status === 'completed' && (r.algorithm === 'cql' || r.algorithm === 'dqn' || r.algorithm === 'cql_rnn'));
+        const completedRuns = runs.filter(r => r.status === 'completed' && ['cql', 'dqn', 'cql_rnn', 'ensemble_cql'].includes(r.algorithm));
         select.innerHTML = '<option value="">-- 选择 --</option>' +
             completedRuns.map(r => `<option value="${r.id}">${LABELS[r.algorithm] || r.algorithm} #${r.id} (奖励: ${r.best_reward ? r.best_reward.toFixed(2) : '-'})</option>`).join('');
     } catch (e) {
@@ -247,13 +272,321 @@ async function refreshRuns() {
 
 document.addEventListener('DOMContentLoaded', () => {
     initCharts();
+    initUncertaintyChart();
+    initFQEChart();
+    initFQELossChart();
+    initExplorationChart();
+    initPerModelChart();
+    initAlphaComparisonChart();
     initQDistChart();
     initQHistogramChart();
     initShiftTimelineChart();
+    initToolbarControls();
     refreshRuns();
     loadShiftRecords();
     loadAlerts();
+    loadPolicyVersions();
 });
+
+// ===== Ensemble Uncertainty Chart =====
+let uncertaintyChart = null;
+
+function initUncertaintyChart() {
+    const ctx = document.getElementById('chart-uncertainty');
+    uncertaintyChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: { legend: { labels: { color: '#aaa' } } },
+            scales: {
+                x: { title: { display: true, text: 'Epoch', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+                y: { title: { display: true, text: 'Q-value Std Dev', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+            },
+        },
+    });
+}
+
+async function loadEnsembleUncertainty(runId) {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/ensemble/uncertainty/${runId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        uncertaintyChart.data = {
+            labels: data.map(m => m.epoch),
+            datasets: [
+                {
+                    label: `Uncertainty Mean (#${runId})`,
+                    data: data.map(m => m.uncertainty_mean),
+                    borderColor: '#a55eea',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.3,
+                },
+                {
+                    label: `Uncertainty Max (#${runId})`,
+                    data: data.map(m => m.uncertainty_max),
+                    borderColor: '#ff6b6b',
+                    backgroundColor: 'transparent',
+                    borderWidth: 1,
+                    borderDash: [5, 5],
+                    pointRadius: 0,
+                    tension: 0.3,
+                },
+            ],
+        };
+        uncertaintyChart.update();
+    } catch (e) {
+        console.error('Error loading ensemble uncertainty:', e);
+    }
+}
+
+// ===== FQE Estimated Value Chart =====
+let fqeChart = null;
+let fqePollingIntervals = {};
+
+function initFQEChart() {
+    const ctx = document.getElementById('chart-fqe-value');
+    fqeChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: { legend: { labels: { color: '#aaa' } } },
+            scales: {
+                x: { title: { display: true, text: 'FQE Epoch', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+                y: { title: { display: true, text: 'Estimated Policy Value', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+            },
+        },
+    });
+}
+
+async function startFQE() {
+    const sourceRunId = parseInt(document.getElementById('fqe-source-run').value);
+    if (!sourceRunId) {
+        alert('请输入有效的源Run ID');
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/fqe/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_run_id: sourceRunId }),
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            alert('FQE启动失败: ' + (err.detail || '未知错误'));
+            return;
+        }
+        const evaluation = await res.json();
+        pollFQEProgress(evaluation.id);
+    } catch (e) {
+        alert('FQE启动失败: ' + e.message);
+    }
+}
+
+function pollFQEProgress(evaluationId) {
+    if (fqePollingIntervals[evaluationId]) return;
+
+    fqePollingIntervals[evaluationId] = setInterval(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/evaluation/fqe/latest/${evaluationId}`);
+            if (!res.ok) return;
+            const data = await res.json();
+
+            if (data.status === 'completed' || data.status === 'failed') {
+                clearInterval(fqePollingIntervals[evaluationId]);
+                delete fqePollingIntervals[evaluationId];
+                await loadFQEResults(evaluationId);
+                return;
+            }
+
+            if (data.epoch && data.estimated_value !== null) {
+                fqeChart.data.labels.push(data.epoch);
+                fqeChart.data.datasets = [{
+                    label: `FQE Value (#${evaluationId})`,
+                    data: [...(fqeChart.data.datasets[0]?.data || []), data.estimated_value],
+                    borderColor: '#45b7d1',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.3,
+                }];
+                fqeChart.update('none');
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    }, 2000);
+}
+
+async function loadFQEResults(evaluationId) {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/fqe/results/${evaluationId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        fqeChart.data = {
+            labels: data.metrics.map(m => m.epoch),
+            datasets: [{
+                label: `FQE Estimated Value (#${evaluationId})`,
+                data: data.metrics.map(m => m.estimated_value),
+                borderColor: '#45b7d1',
+                backgroundColor: 'transparent',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.3,
+            }],
+        };
+        fqeChart.update();
+        loadFQELoss(evaluationId);
+    } catch (e) {
+        console.error('Error loading FQE results:', e);
+    }
+}
+
+// ===== Exploration Ratio Chart =====
+let explorationChart = null;
+
+function initExplorationChart() {
+    const ctx = document.getElementById('chart-exploration');
+    explorationChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: { legend: { labels: { color: '#aaa' } } },
+            scales: {
+                x: { title: { display: true, text: 'Epoch', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+                y: { title: { display: true, text: 'Exploration Ratio', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' }, min: 0, max: 1 },
+            },
+        },
+    });
+}
+
+async function loadExplorationRatio(runId) {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/ensemble/uncertainty/${runId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        explorationChart.data = {
+            labels: data.map(m => m.epoch),
+            datasets: [{
+                label: `Exploration Ratio (#${runId})`,
+                data: data.map(m => m.exploration_ratio),
+                borderColor: '#ff9f43',
+                backgroundColor: 'rgba(255, 159, 67, 0.1)',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.3,
+                fill: true,
+            }],
+        };
+        explorationChart.update();
+    } catch (e) {
+        console.error('Error loading exploration ratio:', e);
+    }
+}
+
+// ===== Alpha Comparison Chart =====
+let alphaComparisonChart = null;
+
+function initAlphaComparisonChart() {
+    const ctx = document.getElementById('chart-alpha-comparison');
+    alphaComparisonChart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: { legend: { labels: { color: '#aaa' } } },
+            scales: {
+                x: { title: { display: true, text: 'Alpha Value', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+                y: { title: { display: true, text: 'Final Reward', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' }, position: 'left' },
+                y2: { title: { display: true, text: 'Convergence Epoch', color: '#888' }, ticks: { color: '#666' }, grid: { display: false }, position: 'right' },
+            },
+        },
+    });
+}
+
+async function startAlphaSweep() {
+    const input = document.getElementById('alpha-sweep-values').value;
+    const alphaValues = input.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
+    if (alphaValues.length === 0) {
+        alert('请输入有效的Alpha值');
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/hyperparams/alpha_sweep`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alpha_values: alphaValues }),
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            alert('Alpha Sweep启动失败: ' + (err.detail || '未知错误'));
+            return;
+        }
+        const data = await res.json();
+        alert(`已启动 ${data.run_ids.length} 个训练任务 (Run IDs: ${data.run_ids.join(', ')})`);
+        refreshRuns();
+    } catch (e) {
+        alert('Alpha Sweep启动失败: ' + e.message);
+    }
+}
+
+async function loadAlphaComparison() {
+    try {
+        const runsRes = await fetch(`${API_BASE}/training/runs`);
+        const allRuns = await runsRes.json();
+        const cqlRuns = allRuns.filter(r => r.algorithm === 'cql' && r.status === 'completed');
+
+        if (cqlRuns.length === 0) {
+            alert('没有已完成的CQL训练记录');
+            return;
+        }
+
+        const runIds = cqlRuns.map(r => r.id).join(',');
+        const res = await fetch(`${API_BASE}/evaluation/hyperparams/alpha_comparison?run_ids=${runIds}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        const comparisons = data.comparisons.sort((a, b) => a.alpha - b.alpha);
+
+        alphaComparisonChart.data = {
+            labels: comparisons.map(c => `α=${c.alpha}`),
+            datasets: [
+                {
+                    label: 'Final Reward',
+                    data: comparisons.map(c => c.final_reward || 0),
+                    backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1,
+                    yAxisID: 'y',
+                },
+                {
+                    label: 'Convergence Epoch',
+                    data: comparisons.map(c => c.convergence_epoch || 0),
+                    backgroundColor: 'rgba(255, 159, 67, 0.6)',
+                    borderColor: 'rgba(255, 159, 67, 1)',
+                    borderWidth: 1,
+                    yAxisID: 'y2',
+                },
+            ],
+        };
+        alphaComparisonChart.update();
+    } catch (e) {
+        console.error('Error loading alpha comparison:', e);
+    }
+}
 
 // ===== Q-Value Distribution Histogram =====
 let qDistChart = null;
@@ -587,4 +920,262 @@ function updateShiftTimeline(records) {
 
     shiftTimelineChart.data = { labels, datasets };
     shiftTimelineChart.update();
+}
+
+// ===== TensorBoard Toolbar Controls =====
+function initToolbarControls() {
+    const smoothingSlider = document.getElementById('tb-smoothing');
+    const smoothingDisplay = document.getElementById('tb-smoothing-value');
+    smoothingSlider.addEventListener('input', () => {
+        smoothingFactor = parseFloat(smoothingSlider.value);
+        smoothingDisplay.textContent = smoothingFactor.toFixed(2);
+        updateCharts();
+    });
+
+    const logScaleCheckbox = document.getElementById('tb-logscale');
+    logScaleCheckbox.addEventListener('change', () => {
+        charts.loss.options.scales.y.type = logScaleCheckbox.checked ? 'logarithmic' : 'linear';
+        charts.loss.update();
+    });
+}
+
+function updateRunToggles() {
+    const container = document.getElementById('tb-run-toggles');
+    const allRunIds = Object.keys(runData);
+    container.innerHTML = allRunIds.map(rid => {
+        const rd = runData[rid];
+        const checked = !hiddenRuns.has(rid) ? 'checked' : '';
+        const color = COLORS[rd.algorithm] || '#fff';
+        return `<label class="tb-toggle-label" style="border-color:${color}">
+            <input type="checkbox" ${checked} onchange="toggleRunVisibility('${rid}')">
+            <span style="color:${color}">${LABELS[rd.algorithm] || rd.algorithm} #${rid}</span>
+        </label>`;
+    }).join('');
+}
+
+function toggleRunVisibility(runId) {
+    if (hiddenRuns.has(runId)) {
+        hiddenRuns.delete(runId);
+    } else {
+        hiddenRuns.add(runId);
+    }
+    updateCharts();
+}
+
+// ===== FQE Loss Chart =====
+let fqeLossChart = null;
+
+function initFQELossChart() {
+    const ctx = document.getElementById('chart-fqe-loss');
+    fqeLossChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: { legend: { labels: { color: '#aaa' } } },
+            scales: {
+                x: { title: { display: true, text: 'FQE Epoch', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+                y: { title: { display: true, text: 'FQE Loss', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+            },
+        },
+    });
+}
+
+async function loadFQELoss(evaluationId) {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/fqe/results/${evaluationId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        fqeLossChart.data = {
+            labels: data.metrics.map(m => m.epoch),
+            datasets: [{
+                label: `FQE Loss (#${evaluationId})`,
+                data: data.metrics.map(m => m.fqe_loss),
+                borderColor: '#ff9f43',
+                backgroundColor: 'transparent',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.3,
+            }],
+        };
+        fqeLossChart.update();
+    } catch (e) {
+        console.error('Error loading FQE loss:', e);
+    }
+}
+
+// ===== Per-Model Losses Chart =====
+let perModelChart = null;
+
+function initPerModelChart() {
+    const ctx = document.getElementById('chart-per-model');
+    perModelChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            responsive: true,
+            animation: { duration: 300 },
+            plugins: { legend: { labels: { color: '#aaa' } } },
+            scales: {
+                x: { title: { display: true, text: 'Epoch', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+                y: { title: { display: true, text: 'Loss', color: '#888' }, ticks: { color: '#666' }, grid: { color: '#333' } },
+            },
+        },
+    });
+}
+
+async function loadPerModelLosses(runId) {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/ensemble/uncertainty/${runId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        const epochs = data.map(m => m.epoch);
+        const modelColors = ['#ff6b6b', '#ff9f43', '#ffd93d', '#6bcf7f', '#45b7d1', '#a55eea', '#e056a0'];
+
+        const validData = data.filter(m => m.per_model_losses && m.per_model_losses.length > 0);
+        if (validData.length === 0) return;
+
+        const nModels = validData[0].per_model_losses.length;
+        const datasets = [];
+        for (let i = 0; i < nModels; i++) {
+            datasets.push({
+                label: `Model ${i + 1}`,
+                data: data.map(m => m.per_model_losses ? m.per_model_losses[i] : null),
+                borderColor: modelColors[i % modelColors.length],
+                backgroundColor: 'transparent',
+                borderWidth: 1.5,
+                pointRadius: 0,
+                tension: 0.3,
+            });
+        }
+
+        perModelChart.data = { labels: epochs, datasets };
+        perModelChart.update();
+    } catch (e) {
+        console.error('Error loading per-model losses:', e);
+    }
+}
+
+// ===== Policy Version Management =====
+async function createPolicyVersion() {
+    const runId = parseInt(document.getElementById('ver-run-id').value);
+    const snapshotId = parseInt(document.getElementById('ver-snapshot-id').value);
+    const versionTag = document.getElementById('ver-tag').value.trim();
+    const fqeId = parseInt(document.getElementById('ver-fqe-id').value) || null;
+
+    if (!runId || !snapshotId || !versionTag) {
+        alert('请填写Run ID、Snapshot ID和版本标签');
+        return;
+    }
+
+    try {
+        const body = {
+            run_id: runId,
+            snapshot_id: snapshotId,
+            version_tag: versionTag,
+        };
+        if (fqeId) body.fqe_evaluation_id = fqeId;
+
+        const res = await fetch(`${API_BASE}/evaluation/versions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            alert('创建版本失败: ' + (err.detail || '未知错误'));
+            return;
+        }
+        loadPolicyVersions();
+    } catch (e) {
+        alert('创建版本失败: ' + e.message);
+    }
+}
+
+async function loadPolicyVersions() {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/versions`);
+        if (!res.ok) return;
+        const versions = await res.json();
+        const tbody = document.getElementById('versions-tbody');
+
+        tbody.innerHTML = versions.map(v => {
+            const stageBadge = v.stage === 'production'
+                ? '<span class="badge-production">生产</span>'
+                : v.stage === 'staging'
+                    ? '<span class="badge-staging">预发布</span>'
+                    : v.stage === 'archived'
+                        ? '<span class="badge-archived">归档</span>'
+                        : '<span class="badge-candidate">候选</span>';
+            return `
+            <tr>
+                <td>${v.id}</td>
+                <td>${v.version_tag}</td>
+                <td>${stageBadge}</td>
+                <td>Run #${v.run_id}</td>
+                <td>${v.fqe_evaluation_id ? 'FQE #' + v.fqe_evaluation_id : '-'}</td>
+                <td>
+                    <button onclick="promoteVersion(${v.id}, 'staging')">预发布</button>
+                    <button onclick="promoteVersion(${v.id}, 'production')">上线</button>
+                    <button onclick="promoteVersion(${v.id}, 'archived')">归档</button>
+                </td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        console.error('Error loading policy versions:', e);
+    }
+}
+
+async function promoteVersion(versionId, stage) {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/versions/${versionId}/stage`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stage }),
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            alert('更新阶段失败: ' + (err.detail || '未知错误'));
+            return;
+        }
+        loadPolicyVersions();
+    } catch (e) {
+        alert('更新阶段失败: ' + e.message);
+    }
+}
+
+async function loadVersionComparison() {
+    try {
+        const res = await fetch(`${API_BASE}/evaluation/versions`);
+        if (!res.ok) return;
+        const versions = await res.json();
+        if (versions.length < 2) {
+            alert('至少需要2个版本才能对比');
+            return;
+        }
+        const ids = versions.slice(0, 5).map(v => v.id).join(',');
+        const compRes = await fetch(`${API_BASE}/evaluation/versions/compare?ids=${ids}`);
+        if (!compRes.ok) return;
+        const data = await compRes.json();
+
+        let html = '<table><thead><tr><th>版本</th><th>阶段</th><th>算法</th><th>最优奖励</th><th>FQE估值</th></tr></thead><tbody>';
+        data.comparisons.forEach(c => {
+            html += `<tr>
+                <td>${c.version_tag}</td>
+                <td>${c.stage}</td>
+                <td>${c.algorithm || '-'}</td>
+                <td>${c.best_reward ? c.best_reward.toFixed(2) : '-'}</td>
+                <td>${c.fqe_estimated_value ? c.fqe_estimated_value.toFixed(4) : '-'}</td>
+            </tr>`;
+        });
+        html += '</tbody></table>';
+
+        const tbody = document.getElementById('versions-tbody');
+        tbody.innerHTML = `<tr><td colspan="6">${html}</td></tr>` + tbody.innerHTML;
+    } catch (e) {
+        console.error('Error loading version comparison:', e);
+    }
 }
