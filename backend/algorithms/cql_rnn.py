@@ -130,7 +130,7 @@ class CQL_RNN:
             if sequence is not None:
                 user_enc = self._encode_sequence(sequence)
             else:
-                user_enc = torch.zeros(1, self.user_encoder.hidden_size, device=self.device)
+                user_enc = self.user_encoder.get_default_embedding(1).to(self.device)
 
             q_values = self.q_network(state_t, user_enc)
             return q_values.argmax(dim=1).item()
@@ -155,7 +155,7 @@ class CQL_RNN:
             if sequence is not None:
                 user_enc = self._encode_sequence(sequence)
             else:
-                user_enc = torch.zeros(1, self.user_encoder.hidden_size, device=self.device)
+                user_enc = self.user_encoder.get_default_embedding(1).to(self.device)
             q_values = self.q_network(state_t, user_enc)
             return q_values.squeeze(0).cpu().numpy()
 

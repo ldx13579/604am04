@@ -10,7 +10,7 @@ from backend.algorithms.dqn import DQN
 from backend.algorithms.cql import CQL
 from backend.algorithms.cql_rnn import CQL_RNN
 from backend.algorithms.behavior_cloning import BehaviorCloning
-from backend.config import DEFAULT_HYPERPARAMS, N_CATEGORIES, N_ITEMS
+from backend.config import DEFAULT_HYPERPARAMS, SHIFT_DETECTION_CONFIG, N_CATEGORIES, N_ITEMS
 
 DEFAULT_CHUNK_REFRESH_INTERVAL = 20
 ERROR_DETAIL_MAX_LENGTH = 5000
@@ -220,7 +220,11 @@ class Trainer:
 
     def _save_snapshot(self, db, run_id: int, epoch: int, algorithm: str,
                        agent, params: dict, reward: float):
-        """Serialize model parameters and save to database."""
+        """Serialize model parameters and save to database.
+
+        Enforces retention policy: only keeps the most recent N snapshots per run,
+        deleting older ones to prevent unbounded storage growth.
+        """
         if hasattr(agent, "get_state_dict"):
             state_dict = agent.get_state_dict()
         elif hasattr(agent, "q_network"):
@@ -247,6 +251,41 @@ class Trainer:
         )
         db.add(snapshot)
         db.commit()
+
+        self._enforce_snapshot_retention(db, run_id)
+
+    def _enforce_snapshot_retention(self, db, run_id: int):
+        """Delete oldest snapshots exceeding the max retention limit per run."""
+        max_snapshots = SHIFT_DETECTION_CONFIG.get("max_snapshots_per_run", 5)
+
+        all_snapshots = db.query(ModelSnapshot).filter(
+            ModelSnapshot.run_id == run_id
+        ).order_by(ModelSnapshot.epoch.desc()).all()
+
+        if len(all_snapshots) > max_snapshots:
+            to_delete = all_snapshots[max_snapshots:]
+            for old_snapshot in to_delete:
+                db.delete(old_snapshot)
+            db.commit()
+
+    @staticmethod
+    def cleanup_all_snapshots():
+        """Run retention cleanup across all training runs. Call periodically."""
+        max_snapshots = SHIFT_DETECTION_CONFIG.get("max_snapshots_per_run", 5)
+        db = SessionLocal()
+        try:
+            run_ids = [r[0] for r in db.query(TrainingRun.id).all()]
+            for run_id in run_ids:
+                snapshots = db.query(ModelSnapshot).filter(
+                    ModelSnapshot.run_id == run_id
+                ).order_by(ModelSnapshot.epoch.desc()).all()
+
+                if len(snapshots) > max_snapshots:
+                    for old in snapshots[max_snapshots:]:
+                        db.delete(old)
+            db.commit()
+        finally:
+            db.close()
 
 
 trainer = Trainer()

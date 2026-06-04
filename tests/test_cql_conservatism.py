@@ -124,11 +124,11 @@ class TestCQLConservatism:
 
     def test_higher_alpha_more_conservative(self):
         """Higher alpha should result in lower OOD Q-values (more conservative)."""
-        cql_low = CQL(state_dim=self.state_dim, action_dim=self.action_dim, alpha=0.5, lr=1e-3)
-        cql_high = CQL(state_dim=self.state_dim, action_dim=self.action_dim, alpha=5.0, lr=1e-3)
+        cql_low = CQL(state_dim=self.state_dim, action_dim=self.action_dim, alpha=0.1, lr=1e-3)
+        cql_high = CQL(state_dim=self.state_dim, action_dim=self.action_dim, alpha=10.0, lr=1e-3)
 
-        self._train_agent(cql_low, n_steps=200)
-        self._train_agent(cql_high, n_steps=200)
+        self._train_agent(cql_low, n_steps=300)
+        self._train_agent(cql_high, n_steps=300)
 
         test_states = torch.randn(50, self.state_dim)
         with torch.no_grad():

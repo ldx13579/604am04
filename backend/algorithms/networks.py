@@ -56,6 +56,10 @@ class UserStateEncoder(nn.Module):
       - dwell_time (1)
       - purchased (1)
       - state (state_dim)
+
+    Features:
+      - Adaptive input gate that scales feature projections based on input statistics
+      - Learned default embedding used when no history data is available
     """
 
     def __init__(self, state_dim: int = 10, action_dim: int = 100,
@@ -68,6 +72,12 @@ class UserStateEncoder(nn.Module):
 
         self.input_dim = action_dim + 3 + state_dim
 
+        self.input_projection = nn.Linear(self.input_dim, self.input_dim)
+        self.adaptive_gate = nn.Sequential(
+            nn.Linear(self.input_dim, self.input_dim),
+            nn.Sigmoid(),
+        )
+
         self.lstm = nn.LSTM(
             input_size=self.input_dim,
             hidden_size=hidden_size,
@@ -76,6 +86,10 @@ class UserStateEncoder(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0,
         )
         self.layer_norm = nn.LayerNorm(hidden_size)
+
+        self.default_embedding = nn.Parameter(torch.zeros(hidden_size))
+        self._embedding_accum = None
+        self._embedding_count = 0
 
     def forward(self, sequences: torch.Tensor, lengths: torch.Tensor = None) -> torch.Tensor:
         """Encode behavior sequences.
@@ -87,16 +101,42 @@ class UserStateEncoder(nn.Module):
         Returns:
             encoded: (batch, hidden_size) - final hidden state
         """
+        gate = self.adaptive_gate(sequences)
+        projected = self.input_projection(sequences) * gate
+
         if lengths is not None:
             packed = nn.utils.rnn.pack_padded_sequence(
-                sequences, lengths.cpu(), batch_first=True, enforce_sorted=False
+                projected, lengths.cpu(), batch_first=True, enforce_sorted=False
             )
             _, (hidden, _) = self.lstm(packed)
         else:
-            _, (hidden, _) = self.lstm(sequences)
+            _, (hidden, _) = self.lstm(projected)
 
         final_hidden = hidden[-1]
-        return self.layer_norm(final_hidden)
+        output = self.layer_norm(final_hidden)
+
+        if self.training:
+            self._update_default_embedding(output)
+
+        return output
+
+    def get_default_embedding(self, batch_size: int = 1) -> torch.Tensor:
+        """Return the learned default user representation for missing history."""
+        return self.default_embedding.unsqueeze(0).expand(batch_size, -1)
+
+    def _update_default_embedding(self, encodings: torch.Tensor):
+        """Update running mean for default embedding during training."""
+        with torch.no_grad():
+            batch_mean = encodings.mean(dim=0)
+            if self._embedding_accum is None:
+                self._embedding_accum = batch_mean.clone()
+            else:
+                self._embedding_accum = self._embedding_accum.to(batch_mean.device)
+                self._embedding_accum = 0.99 * self._embedding_accum + 0.01 * batch_mean
+            self._embedding_count += 1
+
+            if self._embedding_count % 100 == 0:
+                self.default_embedding.data.copy_(self._embedding_accum)
 
     def encode_features(self, actions: torch.Tensor, clicked: torch.Tensor,
                         dwell_times: torch.Tensor, purchased: torch.Tensor,

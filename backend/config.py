@@ -64,4 +64,8 @@ SHIFT_DETECTION_CONFIG = {
     "new_item_ratio_threshold": 0.1,
     "check_interval_seconds": 300,
     "auto_retrain": True,
+    "min_baseline_samples": 10000,
+    "retrain_min_severe_alerts": 2,
+    "severity_multiplier": 2.0,
+    "max_snapshots_per_run": 5,
 }

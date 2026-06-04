@@ -24,20 +24,42 @@ class DistributionShiftDetector:
         self.offline_state_std = None
         self.known_items = set()
         self._initialized = False
+        self._baseline_sample_count = 0
 
     def initialize_baseline(self):
-        """Compute baseline statistics from offline data."""
+        """Compute baseline statistics from offline data.
+
+        Only proceeds if sample count meets the configured minimum threshold,
+        ensuring statistical features are computed on sufficient data.
+        """
+        min_samples = self.config.get("min_baseline_samples", 10000)
+
         db = SessionLocal()
         try:
+            count_row = db.execute(text(
+                "SELECT COUNT(*) FROM offline_transitions"
+            )).fetchone()
+            total_available = count_row[0] if count_row else 0
+
+            if total_available < min_samples:
+                self._initialized = False
+                self._baseline_sample_count = total_available
+                return
+
+            sample_size = min(total_available, 100000)
             result = db.execute(text(
-                "SELECT action, reward, state FROM offline_transitions "
-                "ORDER BY RANDOM() LIMIT 100000"
+                f"SELECT action, reward, state FROM offline_transitions "
+                f"ORDER BY RANDOM() LIMIT {sample_size}"
             )).fetchall()
         finally:
             db.close()
 
-        if not result:
+        if not result or len(result) < min_samples:
+            self._initialized = False
+            self._baseline_sample_count = len(result) if result else 0
             return
+
+        self._baseline_sample_count = len(result)
 
         actions = np.array([r[0] for r in result], dtype=np.int64)
         rewards = np.array([r[1] for r in result], dtype=np.float32)
@@ -178,13 +200,26 @@ class DistributionShiftDetector:
                                  online_rewards: np.ndarray,
                                  online_states: np.ndarray,
                                  current_items: set = None) -> list:
-        """Run detection, save results to DB, and optionally trigger retraining."""
+        """Run detection, save results to DB, and optionally trigger retraining.
+
+        Retraining is only triggered when the number of severe alerts
+        (metric_value >= threshold * severity_multiplier) meets the configured minimum.
+        """
         results = self.detect_shift(online_actions, online_rewards, online_states, current_items)
 
         db = SessionLocal()
         alerts = []
+        severe_alerts = []
+        severity_multiplier = self.config.get("severity_multiplier", 2.0)
+        min_severe_for_retrain = self.config.get("retrain_min_severe_alerts", 2)
+
         try:
             for result in results:
+                is_severe = result["is_alert"] and (
+                    result["metric_value"] >= result["threshold"] * severity_multiplier
+                )
+                result["is_severe"] = is_severe
+
                 record = ShiftDetectionRecord(
                     detection_time=datetime.utcnow(),
                     shift_type=result["shift_type"],
@@ -198,10 +233,17 @@ class DistributionShiftDetector:
                 db.add(record)
                 if result["is_alert"]:
                     alerts.append(result)
+                if is_severe:
+                    severe_alerts.append(result)
 
             db.commit()
 
-            if alerts and self.config.get("auto_retrain", False):
+            should_retrain = (
+                self.config.get("auto_retrain", False) and
+                len(severe_alerts) >= min_severe_for_retrain
+            )
+
+            if should_retrain:
                 retrain_run_id = self._trigger_retrain(db)
                 for record in db.query(ShiftDetectionRecord).filter(
                     ShiftDetectionRecord.is_alert == True,
