@@ -56,6 +56,34 @@ DEFAULT_HYPERPARAMS = {
         "hidden_dims": [256, 256],
         "chunk_refresh_interval": 20,
     },
+    "ensemble_cql": {
+        "alpha": 1.0,
+        "gamma": 0.99,
+        "lr": 3e-4,
+        "batch_size": 256,
+        "epochs": 200,
+        "steps_per_epoch": 1000,
+        "hidden_dims": [256, 256],
+        "target_update_tau": 0.005,
+        "n_models": 5,
+        "uncertainty_threshold": 1.0,
+        "exploration_budget": 0.3,
+        "correlation_threshold": 0.95,
+        "min_active_models": 3,
+        "max_models": 7,
+        "ucb_coefficient": 1.0,
+        "chunk_refresh_interval": 20,
+    },
+}
+
+FQE_DEFAULTS = {
+    "gamma": 0.99,
+    "lr": 1e-3,
+    "epochs": 50,
+    "steps_per_epoch": 500,
+    "batch_size": 256,
+    "hidden_dims": [256, 256],
+    "target_update_tau": 0.005,
 }
 
 SHIFT_DETECTION_CONFIG = {
