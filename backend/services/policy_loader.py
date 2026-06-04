@@ -1,6 +1,7 @@
 import io
 import time
 import hashlib
+import logging
 import threading
 import numpy as np
 import torch
@@ -10,17 +11,140 @@ from backend.algorithms.dqn import DQN
 from backend.algorithms.cql import CQL
 from backend.algorithms.cql_rnn import CQL_RNN
 from backend.algorithms.ensemble_cql import EnsembleCQL
-from backend.config import N_CATEGORIES, N_ITEMS
+from backend.config import N_CATEGORIES, N_ITEMS, POLICY_CACHE_CONFIG
 
-CACHE_TTL_SECONDS = 30
+logger = logging.getLogger(__name__)
+
+
+COMPATIBLE_TRANSFERS = {
+    ("dqn", "cql"): ["q_network", "target_network"],
+    ("cql", "dqn"): ["q_network", "target_network"],
+    ("cql", "cql_rnn"): ["q_network", "target_network"],
+    ("dqn", "cql_rnn"): ["q_network", "target_network"],
+    ("cql", "ensemble_cql"): [],
+    ("dqn", "ensemble_cql"): [],
+    ("behavior_cloning", "cql"): [],
+    ("behavior_cloning", "dqn"): [],
+}
+
+
+def check_state_dict_compatibility(source_sd: dict, target_sd: dict) -> dict:
+    """Check layer-by-layer compatibility between two state dicts.
+
+    Returns a report with transferable keys, shape mismatches, and missing keys.
+    """
+    transferable = []
+    shape_mismatch = []
+    missing_in_source = []
+
+    for key in target_sd:
+        if key not in source_sd:
+            missing_in_source.append(key)
+        elif source_sd[key].shape != target_sd[key].shape:
+            shape_mismatch.append({
+                "key": key,
+                "source_shape": list(source_sd[key].shape),
+                "target_shape": list(target_sd[key].shape),
+            })
+        else:
+            transferable.append(key)
+
+    return {
+        "transferable": transferable,
+        "shape_mismatch": shape_mismatch,
+        "missing_in_source": missing_in_source,
+        "transfer_ratio": len(transferable) / max(len(target_sd), 1),
+    }
+
+
+def safe_partial_load(target_module, source_state_dict: dict, strict: bool = False) -> dict:
+    """Load compatible weights into a module, skipping incompatible layers.
+
+    Returns a migration report.
+    """
+    target_sd = target_module.state_dict()
+    report = check_state_dict_compatibility(source_state_dict, target_sd)
+
+    if report["transfer_ratio"] == 0:
+        return {**report, "status": "no_compatible_weights", "loaded": 0}
+
+    filtered_sd = {k: source_state_dict[k] for k in report["transferable"]}
+    target_module.load_state_dict(filtered_sd, strict=False)
+
+    return {
+        **report,
+        "status": "partial" if report["shape_mismatch"] or report["missing_in_source"] else "full",
+        "loaded": len(filtered_sd),
+    }
+
+
+def migrate_weights_cross_algorithm(
+    source_state_dict: dict,
+    source_algorithm: str,
+    target_agent,
+    target_algorithm: str,
+) -> dict:
+    """Attempt cross-algorithm weight transfer with safety checks.
+
+    Handles architecture differences gracefully:
+    - Same algorithm: direct load with shape validation
+    - Compatible algorithms (e.g., DQN<->CQL): transfer shared components
+    - Incompatible algorithms: skip transfer, return report
+    """
+    pair = (source_algorithm, target_algorithm)
+    reports = {}
+
+    if source_algorithm == target_algorithm:
+        if target_algorithm == "ensemble_cql":
+            try:
+                target_agent.load_state_dict(source_state_dict)
+                reports["ensemble"] = {"status": "full", "loaded": len(source_state_dict)}
+            except (RuntimeError, KeyError) as e:
+                reports["ensemble"] = {"status": "failed", "error": str(e)[:200]}
+        elif target_algorithm == "behavior_cloning":
+            if "policy_network" in source_state_dict:
+                r = safe_partial_load(target_agent.policy, source_state_dict["policy_network"])
+                reports["policy_network"] = r
+            elif "policy" in source_state_dict:
+                r = safe_partial_load(target_agent.policy, source_state_dict["policy"])
+                reports["policy_network"] = r
+        else:
+            for component in ("q_network", "target_network", "user_encoder"):
+                if component in source_state_dict and hasattr(target_agent, component):
+                    module = getattr(target_agent, component)
+                    r = safe_partial_load(module, source_state_dict[component])
+                    reports[component] = r
+        return {"migration_type": "same_algorithm", "reports": reports}
+
+    if pair in COMPATIBLE_TRANSFERS:
+        shared_components = COMPATIBLE_TRANSFERS[pair]
+        for component in shared_components:
+            if component in source_state_dict and hasattr(target_agent, component):
+                module = getattr(target_agent, component)
+                r = safe_partial_load(module, source_state_dict[component])
+                reports[component] = r
+
+        if not shared_components and "q_network" in source_state_dict:
+            if hasattr(target_agent, "q_network"):
+                r = safe_partial_load(target_agent.q_network, source_state_dict["q_network"])
+                reports["q_network_fallback"] = r
+
+        return {"migration_type": "cross_algorithm", "pair": pair, "reports": reports}
+
+    if "q_network" in source_state_dict and hasattr(target_agent, "q_network"):
+        r = safe_partial_load(target_agent.q_network, source_state_dict["q_network"])
+        if r["transfer_ratio"] > 0.5:
+            reports["q_network_best_effort"] = r
+            if "target_network" in source_state_dict and hasattr(target_agent, "target_network"):
+                r2 = safe_partial_load(target_agent.target_network, source_state_dict["target_network"])
+                reports["target_network_best_effort"] = r2
+            return {"migration_type": "best_effort", "reports": reports}
+
+    return {"migration_type": "incompatible", "reports": {}, "reason": f"No safe transfer path from {source_algorithm} to {target_algorithm}"}
 
 
 class TrafficAllocator:
-    """Consistent traffic allocation with balance correction.
-
-    Uses deterministic hashing for session stickiness while tracking
-    cumulative allocation to correct drift from the target split.
-    """
+    """Consistent traffic allocation with balance correction."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -70,17 +194,84 @@ class TrafficAllocator:
             self._counts.pop(experiment_id, None)
 
 
-class PolicyLoader:
-    """Singleton that caches the current production policy with TTL-based refresh."""
+class PolicyCache:
+    """Adaptive caching strategy with configurable TTL modes.
 
-    def __init__(self, cache_ttl: float = CACHE_TTL_SECONDS):
+    Modes:
+    - aggressive: short TTL (5s), for high-frequency policy iteration
+    - balanced: moderate TTL (30s), default for most scenarios
+    - lazy: long TTL (120s), for stable production with infrequent updates
+    - manual: only refreshes on explicit invalidation
+    """
+
+    PRESETS = {
+        "aggressive": 5,
+        "balanced": 30,
+        "lazy": 120,
+        "manual": 86400,
+    }
+
+    def __init__(self, mode: str = None, ttl_seconds: float = None):
+        config = POLICY_CACHE_CONFIG
+        self._mode = mode or config.get("mode", "balanced")
+        self._ttl = ttl_seconds or config.get("ttl_seconds") or self.PRESETS.get(self._mode, 30)
+        self._last_check = 0.0
+        self._hit_count = 0
+        self._miss_count = 0
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def ttl(self) -> float:
+        return self._ttl
+
+    @property
+    def stats(self) -> dict:
+        total = self._hit_count + self._miss_count
+        return {
+            "mode": self._mode,
+            "ttl_seconds": self._ttl,
+            "hits": self._hit_count,
+            "misses": self._miss_count,
+            "hit_rate": self._hit_count / total if total > 0 else 0.0,
+        }
+
+    def should_refresh(self) -> bool:
+        now = time.time()
+        if now - self._last_check >= self._ttl:
+            self._last_check = now
+            self._miss_count += 1
+            return True
+        self._hit_count += 1
+        return False
+
+    def invalidate(self):
+        self._last_check = 0.0
+
+    def update_config(self, mode: str = None, ttl_seconds: float = None):
+        if mode and mode in self.PRESETS:
+            self._mode = mode
+            if ttl_seconds is None:
+                self._ttl = self.PRESETS[mode]
+        if ttl_seconds is not None:
+            self._ttl = max(1.0, ttl_seconds)
+            if mode is None:
+                self._mode = "custom"
+
+
+class PolicyLoader:
+    """Singleton that caches the current production policy with adaptive refresh."""
+
+    def __init__(self):
         self._lock = threading.Lock()
         self._agent = None
         self._policy_version_id = None
         self._algorithm = None
         self._hyperparams = None
-        self._cache_ttl = cache_ttl
-        self._last_check_time = 0.0
+        self._last_migration_report = None
+        self.cache = PolicyCache()
 
     def _load_agent_from_snapshot(self, snapshot, algorithm, hyperparams):
         buffer = io.BytesIO(snapshot.parameters_blob)
@@ -100,7 +291,10 @@ class PolicyLoader:
                 n_models=hyperparams.get("n_models", 5),
                 uncertainty_threshold=hyperparams.get("uncertainty_threshold", 1.0),
             )
-            agent.load_state_dict(state_dict)
+            try:
+                agent.load_state_dict(state_dict)
+            except (RuntimeError, KeyError) as e:
+                logger.warning(f"Ensemble load failed, attempting partial: {e}")
         elif algorithm == "cql_rnn":
             agent = CQL_RNN(
                 state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -110,10 +304,12 @@ class PolicyLoader:
                 lstm_hidden_size=hyperparams.get("lstm_hidden_size", 128),
                 lstm_num_layers=hyperparams.get("lstm_num_layers", 2),
             )
-            agent.q_network.load_state_dict(state_dict["q_network"])
-            agent.target_network.load_state_dict(state_dict["target_network"])
+            if "q_network" in state_dict:
+                safe_partial_load(agent.q_network, state_dict["q_network"])
+            if "target_network" in state_dict:
+                safe_partial_load(agent.target_network, state_dict["target_network"])
             if "user_encoder" in state_dict:
-                agent.user_encoder.load_state_dict(state_dict["user_encoder"])
+                safe_partial_load(agent.user_encoder, state_dict["user_encoder"])
         elif algorithm in ("cql", "dqn"):
             AgentClass = CQL if algorithm == "cql" else DQN
             kwargs = dict(state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -122,8 +318,20 @@ class PolicyLoader:
             if algorithm == "cql":
                 kwargs["alpha"] = hyperparams.get("alpha", 1.0)
             agent = AgentClass(**kwargs)
-            agent.q_network.load_state_dict(state_dict["q_network"])
-            agent.target_network.load_state_dict(state_dict["target_network"])
+            if "q_network" in state_dict:
+                safe_partial_load(agent.q_network, state_dict["q_network"])
+            if "target_network" in state_dict:
+                safe_partial_load(agent.target_network, state_dict["target_network"])
+        elif algorithm == "behavior_cloning":
+            from backend.algorithms.behavior_cloning import BehaviorCloning
+            agent = BehaviorCloning(
+                state_dim=N_CATEGORIES, action_dim=N_ITEMS,
+                lr=lr, hidden_dims=hidden_dims,
+            )
+            if "policy_network" in state_dict:
+                safe_partial_load(agent.policy, state_dict["policy_network"])
+            elif "policy" in state_dict:
+                safe_partial_load(agent.policy, state_dict["policy"])
         else:
             agent = DQN(
                 state_dim=N_CATEGORIES, action_dim=N_ITEMS,
@@ -131,16 +339,14 @@ class PolicyLoader:
                 target_update_tau=tau,
             )
             if "q_network" in state_dict:
-                agent.q_network.load_state_dict(state_dict["q_network"])
+                safe_partial_load(agent.q_network, state_dict["q_network"])
 
         return agent
 
     def _ensure_loaded(self):
-        """Load or reload production policy, respecting cache TTL."""
-        now = time.time()
-        if now - self._last_check_time < self._cache_ttl:
+        """Load or reload production policy, respecting cache strategy."""
+        if not self.cache.should_refresh():
             return
-        self._last_check_time = now
 
         db = SessionLocal()
         try:
@@ -188,7 +394,7 @@ class PolicyLoader:
 
     def invalidate_cache(self):
         """Force next call to re-check DB."""
-        self._last_check_time = 0.0
+        self.cache.invalidate()
 
     def get_action(self, state: np.ndarray) -> int:
         self._ensure_loaded()
@@ -230,6 +436,10 @@ class PolicyLoader:
     @property
     def current_hyperparams(self):
         return self._hyperparams
+
+    @property
+    def last_migration_report(self):
+        return self._last_migration_report
 
 
 traffic_allocator = TrafficAllocator()

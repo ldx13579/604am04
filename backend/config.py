@@ -123,3 +123,8 @@ BENCHMARK_CONFIG = {
     "default_sizes": [10000, 50000, 100000, 500000, 1000000],
     "default_epochs": 50,
 }
+
+POLICY_CACHE_CONFIG = {
+    "mode": "balanced",
+    "ttl_seconds": 30,
+}

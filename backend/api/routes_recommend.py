@@ -6,7 +6,8 @@ from backend.database import SessionLocal
 from backend.models import ABExperiment, ABImpression, ABClick, OnlineInteraction
 from backend.services.policy_loader import policy_loader, traffic_allocator
 from backend.schemas import (
-    RecommendRequest, RecommendResponse, FeedbackRequest, PolicyInfoResponse
+    RecommendRequest, RecommendResponse, FeedbackRequest, PolicyInfoResponse,
+    CacheConfigUpdateRequest,
 )
 
 router = APIRouter(prefix="/api/recommend", tags=["recommend"])
@@ -133,3 +134,19 @@ async def traffic_balance():
         return balance
     finally:
         db.close()
+
+
+@router.get("/cache_config")
+async def get_cache_config():
+    return policy_loader.cache.stats
+
+
+@router.put("/cache_config")
+async def update_cache_config(request: CacheConfigUpdateRequest):
+    policy_loader.cache.update_config(
+        mode=request.mode,
+        ttl_seconds=request.ttl_seconds,
+    )
+    if request.invalidate:
+        policy_loader.invalidate_cache()
+    return policy_loader.cache.stats

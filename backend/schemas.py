@@ -267,3 +267,9 @@ class PerfReportEntry(BaseModel):
 
 class PerfReportResponse(BaseModel):
     entries: List[PerfReportEntry]
+
+
+class CacheConfigUpdateRequest(BaseModel):
+    mode: Optional[str] = None
+    ttl_seconds: Optional[float] = None
+    invalidate: bool = False

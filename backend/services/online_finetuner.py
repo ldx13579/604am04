@@ -8,7 +8,7 @@ from backend.database import SessionLocal
 from backend.models import (
     OnlineInteraction, FinetuneRun, PolicyVersion, ModelSnapshot, TrainingRun
 )
-from backend.services.policy_loader import policy_loader
+from backend.services.policy_loader import policy_loader, migrate_weights_cross_algorithm, safe_partial_load
 from backend.algorithms.cql import CQL
 from backend.algorithms.dqn import DQN
 from backend.algorithms.cql_rnn import CQL_RNN
@@ -64,9 +64,9 @@ FINETUNE_STRATEGY = {
     "behavior_cloning": {
         "class": BehaviorCloning,
         "extra_kwargs": lambda hp: {},
-        "state_dict_keys": ("policy_network",),
+        "state_dict_keys": ("policy",),
         "save_fn": lambda agent: {
-            "policy_network": agent.policy_network.state_dict(),
+            "policy_network": agent.policy.state_dict(),
         },
     },
 }
@@ -84,6 +84,7 @@ class OnlineFinetuner:
         self.last_run_at = None
         self.last_reward_improvement = None
         self.last_algorithm_used = None
+        self._last_migration_report = None
         self._lock = threading.Lock()
 
     def get_status(self) -> dict:
@@ -158,17 +159,20 @@ class OnlineFinetuner:
         agent = strategy["class"](**base_kwargs)
         return agent, strategy
 
-    def _load_weights(self, agent, strategy, snapshot, algorithm):
-        """Load pre-trained weights into the agent."""
+    def _load_weights(self, agent, strategy, snapshot, algorithm, source_algorithm=None):
+        """Load pre-trained weights with cross-algorithm migration support."""
         buffer = io.BytesIO(snapshot.parameters_blob)
         state_dict = torch.load(buffer, map_location="cpu", weights_only=False)
 
-        if algorithm == "ensemble_cql":
-            agent.load_state_dict(state_dict)
-        elif strategy["state_dict_keys"]:
-            for key in strategy["state_dict_keys"]:
-                if key in state_dict and hasattr(agent, key):
-                    getattr(agent, key).load_state_dict(state_dict[key])
+        src_algo = source_algorithm or algorithm
+        report = migrate_weights_cross_algorithm(
+            source_state_dict=state_dict,
+            source_algorithm=src_algo,
+            target_agent=agent,
+            target_algorithm=algorithm,
+        )
+        self._last_migration_report = report
+        return report
 
     def _do_finetune(self):
         config = FINETUNE_CONFIG
@@ -206,15 +210,19 @@ class OnlineFinetuner:
             dones = np.array([1.0 if i.done else 0.0 for i in interactions], dtype=np.float32)
 
             snapshot = None
+            source_algorithm = None
             if prod_version:
                 snapshot = db.query(ModelSnapshot).get(prod_version.snapshot_id)
+                source_run = db.query(TrainingRun).get(prod_version.run_id)
+                if source_run:
+                    source_algorithm = source_run.algorithm
         finally:
             db.close()
 
         agent, strategy = self._create_agent(algorithm, hyperparams)
 
         if snapshot:
-            self._load_weights(agent, strategy, snapshot, algorithm)
+            self._load_weights(agent, strategy, snapshot, algorithm, source_algorithm)
 
         env = RecommendationEnv(seed=42)
         reward_before = env.evaluate_policy(agent.get_action, n_episodes=10)
