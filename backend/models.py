@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, BigInteger, Float, Boolean, String, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, BigInteger, Float, Boolean, String, Text, DateTime, ForeignKey, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import relationship
 from backend.database import Base
@@ -27,6 +27,18 @@ class OfflineTransition(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class GenerationStatus(Base):
+    __tablename__ = "generation_status"
+
+    id = Column(Integer, primary_key=True, default=1)
+    is_running = Column(Boolean, nullable=False, default=False)
+    progress = Column(Float, nullable=False, default=0.0)
+    total_generated = Column(Integer, nullable=False, default=0)
+    target_count = Column(Integer, nullable=False, default=1000000)
+    last_episode_id = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class TrainingRun(Base):
     __tablename__ = "training_runs"
 
@@ -37,7 +49,9 @@ class TrainingRun(Base):
     started_at = Column(DateTime, server_default=func.now())
     completed_at = Column(DateTime, nullable=True)
     total_epochs = Column(Integer, nullable=False, default=0)
+    current_epoch = Column(Integer, nullable=False, default=0)
     best_reward = Column(Float, nullable=True)
+    error_detail = Column(Text, nullable=True)
 
     metrics = relationship("TrainingMetric", back_populates="run", cascade="all, delete-orphan")
 

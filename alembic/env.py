@@ -7,7 +7,7 @@ from alembic import context
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.database import Base
-from backend.models import Item, OfflineTransition, TrainingRun, TrainingMetric
+from backend.models import Item, OfflineTransition, TrainingRun, TrainingMetric, GenerationStatus
 
 config = context.config
 

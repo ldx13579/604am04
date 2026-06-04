@@ -26,6 +26,8 @@ app.include_router(metrics_router)
 @app.on_event("startup")
 async def startup():
     Base.metadata.create_all(bind=engine)
+    from backend.data.generator import data_generator
+    data_generator.restore_state()
 
 
 @app.get("/api/health")

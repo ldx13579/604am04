@@ -16,7 +16,9 @@ class TrainingRunResponse(BaseModel):
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     total_epochs: int
+    current_epoch: Optional[int] = 0
     best_reward: Optional[float]
+    error_detail: Optional[str] = None
 
     class Config:
         from_attributes = True

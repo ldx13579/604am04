@@ -1,8 +1,8 @@
-import asyncio
 from fastapi import APIRouter, BackgroundTasks
 from backend.data.generator import data_generator
 from backend.schemas import DataStatusResponse, DataStatsResponse
 from backend.database import SessionLocal
+from backend.models import GenerationStatus
 from sqlalchemy import text
 
 router = APIRouter(prefix="/api/data", tags=["data"])
@@ -19,11 +19,25 @@ async def generate_data(background_tasks: BackgroundTasks):
 
 @router.get("/status", response_model=DataStatusResponse)
 async def get_data_status():
-    return DataStatusResponse(
-        is_running=data_generator.is_running,
-        progress=data_generator.progress,
-        total_generated=data_generator.total_generated,
-    )
+    if data_generator.is_running:
+        return DataStatusResponse(
+            is_running=True,
+            progress=data_generator.progress,
+            total_generated=data_generator.total_generated,
+        )
+
+    db = SessionLocal()
+    try:
+        status = db.query(GenerationStatus).get(1)
+        if status:
+            return DataStatusResponse(
+                is_running=status.is_running,
+                progress=status.progress,
+                total_generated=status.total_generated,
+            )
+        return DataStatusResponse(is_running=False, progress=0.0, total_generated=0)
+    finally:
+        db.close()
 
 
 @router.get("/stats", response_model=DataStatsResponse)

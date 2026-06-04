@@ -1,13 +1,17 @@
 import numpy as np
 from sqlalchemy.orm import Session
+from sqlalchemy import func as sa_func
 from backend.config import N_ITEMS, N_TRANSITIONS, BATCH_INSERT_SIZE, N_CATEGORIES
 from backend.environment.simulator import RecommendationEnv
-from backend.models import OfflineTransition, Item
+from backend.models import OfflineTransition, Item, GenerationStatus
 from backend.database import SessionLocal
 
 
 class DataGenerator:
-    """Generates offline transitions using random policy and inserts into PostgreSQL."""
+    """Generates offline transitions using random policy and inserts into PostgreSQL.
+
+    State is persisted to the generation_status table so progress survives restarts.
+    """
 
     def __init__(self):
         self.env = RecommendationEnv()
@@ -15,19 +19,75 @@ class DataGenerator:
         self.is_running = False
         self.total_generated = 0
 
+    def restore_state(self):
+        """Restore generator state from database after service restart."""
+        db = SessionLocal()
+        try:
+            status = db.query(GenerationStatus).get(1)
+            if status:
+                self.progress = status.progress
+                self.total_generated = status.total_generated
+                if status.is_running:
+                    status.is_running = False
+                    db.commit()
+            else:
+                count = db.query(sa_func.count(OfflineTransition.id)).scalar() or 0
+                self.total_generated = count
+                self.progress = min(count / N_TRANSITIONS, 1.0)
+        finally:
+            db.close()
+
+    def _get_or_create_status(self, db: Session) -> GenerationStatus:
+        status = db.query(GenerationStatus).get(1)
+        if not status:
+            status = GenerationStatus(
+                id=1,
+                is_running=False,
+                progress=0.0,
+                total_generated=0,
+                target_count=N_TRANSITIONS,
+                last_episode_id=0,
+            )
+            db.add(status)
+            db.commit()
+            db.refresh(status)
+        return status
+
+    def _update_status(self, db: Session, **kwargs):
+        status = self._get_or_create_status(db)
+        for k, v in kwargs.items():
+            setattr(status, k, v)
+        db.commit()
+
     def generate(self, n_transitions: int = N_TRANSITIONS, callback=None):
         self.is_running = True
-        self.total_generated = 0
 
         db = SessionLocal()
         try:
             self._seed_items(db)
+
+            status = self._get_or_create_status(db)
+            already_generated = db.query(sa_func.count(OfflineTransition.id)).scalar() or 0
+            remaining = n_transitions - already_generated
+
+            if remaining <= 0:
+                self.total_generated = already_generated
+                self.progress = 1.0
+                self._update_status(db, is_running=False, progress=1.0,
+                                    total_generated=already_generated)
+                return
+
+            episode_id = status.last_episode_id
+            self.total_generated = already_generated
+
+            self._update_status(db, is_running=True, progress=already_generated / n_transitions,
+                                total_generated=already_generated)
+
             buffer = []
-            episode_id = 0
             state = self.env.reset()
             step_in_episode = 0
 
-            for i in range(n_transitions):
+            for i in range(remaining):
                 action = np.random.randint(0, N_ITEMS)
                 next_state, reward, done = self.env.step(action)
 
@@ -53,8 +113,14 @@ class DataGenerator:
                     db.bulk_save_objects(buffer)
                     db.commit()
                     buffer = []
-                    self.total_generated = i + 1
-                    self.progress = (i + 1) / n_transitions
+                    self.total_generated = already_generated + i + 1
+                    self.progress = self.total_generated / n_transitions
+                    self._update_status(
+                        db,
+                        progress=self.progress,
+                        total_generated=self.total_generated,
+                        last_episode_id=episode_id,
+                    )
                     if callback:
                         callback(self.progress)
 
@@ -64,6 +130,11 @@ class DataGenerator:
                 self.total_generated = n_transitions
 
             self.progress = 1.0
+            self._update_status(db, is_running=False, progress=1.0,
+                                total_generated=n_transitions, last_episode_id=episode_id)
+        except Exception:
+            self._update_status(db, is_running=False)
+            raise
         finally:
             db.close()
             self.is_running = False

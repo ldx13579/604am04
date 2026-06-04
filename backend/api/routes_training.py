@@ -24,6 +24,7 @@ async def start_training(request: TrainingStartRequest, background_tasks: Backgr
             hyperparameters=merged,
             status="pending",
             total_epochs=merged.get("epochs", 200),
+            current_epoch=0,
         )
         db.add(run)
         db.commit()
