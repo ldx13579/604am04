@@ -255,22 +255,45 @@ class Trainer:
         self._enforce_snapshot_retention(db, run_id)
 
     def _enforce_snapshot_retention(self, db, run_id: int):
-        """Delete oldest snapshots exceeding the max retention limit per run."""
+        """Retain the most recent N snapshots, but protect best-performing ones.
+
+        Strategy: always keep the top-performing snapshot regardless of age,
+        then fill remaining slots by recency. This prevents accidentally deleting
+        a historically optimal checkpoint when newer but weaker models are saved.
+        """
         max_snapshots = SHIFT_DETECTION_CONFIG.get("max_snapshots_per_run", 5)
 
         all_snapshots = db.query(ModelSnapshot).filter(
             ModelSnapshot.run_id == run_id
         ).order_by(ModelSnapshot.epoch.desc()).all()
 
-        if len(all_snapshots) > max_snapshots:
-            to_delete = all_snapshots[max_snapshots:]
-            for old_snapshot in to_delete:
-                db.delete(old_snapshot)
-            db.commit()
+        if len(all_snapshots) <= max_snapshots:
+            return
+
+        best_snapshot = max(
+            all_snapshots,
+            key=lambda s: s.performance_reward if s.performance_reward is not None else -float("inf")
+        )
+
+        recent_snapshots = all_snapshots[:max_snapshots]
+        if best_snapshot not in recent_snapshots:
+            retained = set(s.id for s in recent_snapshots[: max_snapshots - 1])
+            retained.add(best_snapshot.id)
+        else:
+            retained = set(s.id for s in recent_snapshots)
+
+        for snapshot in all_snapshots:
+            if snapshot.id not in retained:
+                db.delete(snapshot)
+        db.commit()
 
     @staticmethod
     def cleanup_all_snapshots():
-        """Run retention cleanup across all training runs. Call periodically."""
+        """Run retention cleanup across all training runs. Call periodically.
+
+        Uses performance-aware retention: keeps recent snapshots but protects
+        the best-performing one per run from deletion.
+        """
         max_snapshots = SHIFT_DETECTION_CONFIG.get("max_snapshots_per_run", 5)
         db = SessionLocal()
         try:
@@ -280,9 +303,24 @@ class Trainer:
                     ModelSnapshot.run_id == run_id
                 ).order_by(ModelSnapshot.epoch.desc()).all()
 
-                if len(snapshots) > max_snapshots:
-                    for old in snapshots[max_snapshots:]:
-                        db.delete(old)
+                if len(snapshots) <= max_snapshots:
+                    continue
+
+                best = max(
+                    snapshots,
+                    key=lambda s: s.performance_reward if s.performance_reward is not None else -float("inf")
+                )
+
+                recent = snapshots[:max_snapshots]
+                if best not in recent:
+                    retained = set(s.id for s in recent[:max_snapshots - 1])
+                    retained.add(best.id)
+                else:
+                    retained = set(s.id for s in recent)
+
+                for s in snapshots:
+                    if s.id not in retained:
+                        db.delete(s)
             db.commit()
         finally:
             db.close()

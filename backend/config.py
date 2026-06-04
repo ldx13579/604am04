@@ -65,7 +65,12 @@ SHIFT_DETECTION_CONFIG = {
     "check_interval_seconds": 300,
     "auto_retrain": True,
     "min_baseline_samples": 10000,
+    "min_action_entropy_ratio": 0.3,
+    "min_action_coverage_ratio": 0.1,
+    "min_reward_std": 0.01,
+    "max_collapsed_state_dims_ratio": 0.5,
     "retrain_min_severe_alerts": 2,
     "severity_multiplier": 2.0,
+    "composite_retrain_threshold": 4.0,
     "max_snapshots_per_run": 5,
 }
